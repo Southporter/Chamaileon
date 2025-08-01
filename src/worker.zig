@@ -50,12 +50,24 @@ const Queue = struct {
 };
 
 const Message = union(enum) {
-    login: void,
-    authenticate: void,
     logout: void,
 };
 
 pub var queue: Queue = .{};
+
+pub var state: State = .{};
+
+pub const State = struct {
+    lock: std.Thread.RwLock = .{},
+    boxes: std.ArrayList([]const u8) = .empty,
+    data: Data = .{},
+
+    const Data = struct {
+        host: []const u8 = "",
+        port: usize = 993,
+        details: []const u8 = "",
+    };
+};
 
 pub fn worker(alloc: std.mem.Allocator, config: mailbox.Config) void {
     log.info("Starting Mailbox Worker", .{});
@@ -65,6 +77,7 @@ pub fn worker(alloc: std.mem.Allocator, config: mailbox.Config) void {
         std.log.err("Failed to rescan CA bundle: {}", .{err});
         return;
     };
+
     log.info("Connecting to the server", .{});
     var session = mailbox.ImapSession.connectTls(alloc, .{
         .host = "imap.gmail.com",
@@ -74,6 +87,14 @@ pub fn worker(alloc: std.mem.Allocator, config: mailbox.Config) void {
         return;
     };
     defer session.disconnect(alloc);
+    {
+        state.lock.lock();
+        defer state.lock.unlock();
+
+        state.data.host = "imap.gmail.com";
+        state.data.port = 993;
+        state.data.details = session.info;
+    }
 
     log.info("Authenticating", .{});
     session.authenticatePlain(
@@ -88,17 +109,10 @@ pub fn worker(alloc: std.mem.Allocator, config: mailbox.Config) void {
 
     log.info("Authentication successful", .{});
 
+
     while (true) {
         if (queue.pop(std.time.ns_per_s * 5)) |msg| {
             switch (msg) {
-                .login => {
-                    log.info("Received login message", .{});
-                    // Handle login logic here
-                },
-                .authenticate => {
-                    log.info("Received authenticate message", .{});
-                    // Handle authentication logic here
-                },
                 .logout => {
                     return;
                 },
