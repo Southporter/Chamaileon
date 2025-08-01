@@ -107,8 +107,23 @@ pub fn worker(alloc: std.mem.Allocator, config: mailbox.Config) void {
     };
     defer session.logout();
 
-    log.info("Authentication successful", .{});
-
+    blk: {
+        log.info("Authentication successful", .{});
+        const boxes = session.list("", "*") catch |err| {
+            std.log.err("Failed to list mailboxes: {}", .{err});
+            break :blk;
+        };
+        state.lock.lock();
+        defer state.lock.unlock();
+        state.boxes.clearRetainingCapacity();
+        for (boxes) |box| {
+            if (box.name.len > 0) {
+                state.boxes.append(box.name) catch |err| {
+                    std.log.err("Failed to append mailbox name: {}", .{err});
+                };
+            }
+        }
+    }
 
     while (true) {
         if (queue.pop(std.time.ns_per_s * 5)) |msg| {
