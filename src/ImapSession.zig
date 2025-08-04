@@ -272,7 +272,7 @@ pub fn list(self: *ImapSession, alloc: std.mem.Allocator, root: []const u8, patt
 const ResponseParser = struct {
     tag: []const u8,
     buffer: []const u8,
-    start: usize = 0,
+    offset: usize = 0,
     state: ParserState = .init,
     const ParserState = enum {
         init,
@@ -285,51 +285,65 @@ const ResponseParser = struct {
 
     const Response = union(enum) {
         untagged: struct {
-            kind: []const u8,
             value: []const u8,
+            kind: []const u8,
         },
-        tagged: []const u8,
+        tagged: struct {
+            value: []const u8,
+            kind: Tag,
+            },
+
+        const Tag = enum {
+            ok,
+            no,
+            bad,
+        };
     };
 
     pub fn next(self: *ResponseParser) ?Response {
+        var start = self.offset;
+        std.debug.print("NEXT: ({s}) {s}\n", .{self.buffer[start..start + 1], @tagName(self.state)});
         parser: switch (self.state) {
             .init, .line_end => {
-                if (self.buffer[self.start] == '*') {
+                if (self.buffer[start] == '*') {
                     self.state = .untagged;
-                    self.start += 1;
+                    continue :parser .untagged;
                 } else {
                     self.state = .tag;
                     continue :parser .tag;
                 }
             },
             .untagged => {
-                const kind_end = std.mem.indexOfScalar(u8, self.buffer[self.start..], ' ') orelse return null;
-                const kind = self.buffer[self.start .. self.start + kind_end];
-                self.start += kind_end + 1; // Skip the space
-                const value_end = std.mem.indexOfScalar(u8, self.buffer[self.start..], '\r') orelse return null;
-                const value = self.buffer[self.start .. self.start + value_end];
-                self.start += value_end + 2; // Skip the \r\n
+                start += 2;
+                std.debug.print("UNTAGGED\n", .{});
+                const kind_end = std.mem.indexOfScalar(u8, self.buffer[start..], ' ') orelse return null;
+                const kind = self.buffer[start .. start + kind_end - 1];
+                std.debug.print("KIND: {s}\n", .{kind});
+                start += kind_end + 1; // Skip the space
+                const value_end = std.mem.indexOfScalar(u8, self.buffer[start..], '\r') orelse return null;
+                const value = self.buffer[start .. start + value_end];
+                self.offset += value_end + 2; // Skip the \r\n
                 self.state = .line_end;
                 return Response{ .untagged = .{ .kind = kind, .value = value } };
             },
             .tag => {
-                const tag_end = std.mem.indexOfScalar(u8, self.buffer[self.start..], ' ') orelse return null;
-                const tag = self.buffer[self.start .. self.start + tag_end];
+                const tag_end = std.mem.indexOfScalar(u8, self.buffer[start..], ' ') orelse return null;
+                const tag = self.buffer[start .. start + tag_end];
                 if (!std.mem.eql(u8, tag, self.tag)) {
                     log.err("Unexpected tag in response: {s}", .{tag});
                     return null;
                 }
-                self.start += tag_end + 1; // Skip the space
+                self.offset += tag_end + 1; // Skip the space
                 self.state = .response;
                 continue :parser .response;
             },
             .response => {
-                const response_end = std.mem.indexOfScalar(u8, self.buffer[self.start..], '\r') orelse return null;
-                const response = self.buffer[self.start .. self.start + response_end];
-                self.start += response_end + 2; // Skip the \r\n
+                const response_end = std.mem.indexOfScalar(u8, self.buffer[start..], '\r') orelse return null;
+                const response = self.buffer[start .. start + response_end];
+                start += response_end + 2; // Skip the \r\n
                 if (std.mem.eql(u8, response, "OK")) {
                     self.state = .line_end;
-                    return Response{ .tagged = "OK" };
+                    return Response{ .tagged = .{ .kind = .ok, .value = response, }};
                 } else if (std.mem.eql(u8, response, "NO") or std.mem.eql(u8, response, "BAD")) {
                     log.err("IMAP server responded with error: {s}", .{response});
                     return null;
@@ -356,7 +370,7 @@ test "ResponseParser - full buffer" {
     try std.testing.expectEqualStrings("IMAP4rev1", res.untagged.value);
     try std.testing.expectEqual(parser.state, .line_end);
     res = parser.next() orelse return error.UnexpectedResponse;
-    try std.testing.expectEqualStrings("A001 OK", res.tagged);
+    try std.testing.expectEqual(.ok, res.tagged.kind);
     try std.testing.expectEqual(parser.state, .line_end);
     try std.testing.expectEqual(null, parser.next());
     try std.testing.expectEqual(parser.state, .end);
