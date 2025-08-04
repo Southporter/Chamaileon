@@ -1,0 +1,11 @@
+{
+  "$schema": "https://charm.land/crush.json",
+  "lsp": {
+    "zig": {
+      "command": "zls"
+    },
+    "zon": {
+      "command": "zls"
+    }
+  }
+}

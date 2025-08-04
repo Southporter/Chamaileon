@@ -20,11 +20,11 @@ const Queue = struct {
         if (self.write_index >= self.messages.len) {
             self.write_index = 0;
         }
-        self.lock.store(WAKE_VALUE, .release);
+        self.lock.store(WAKE_VALUE, .seq_cst);
     }
     pub fn pushImmediate(self: *Queue, msg: Message) void {
         self.messages[self.read_index] = msg;
-        self.lock.store(WAKE_VALUE, .release);
+        self.lock.store(WAKE_VALUE, .seq_cst);
     }
 
     fn isEmpty(self: *Queue) bool {
@@ -33,18 +33,17 @@ const Queue = struct {
 
     pub fn pop(self: *Queue, timeout: u64) ?Message {
         if (self.isEmpty()) {
-            std.Thread.Futex.timedWait(&self.lock, WAKE_VALUE, timeout) catch {};
+            std.Thread.Futex.timedWait(&self.lock, 0, timeout) catch {};
         }
         if (self.isEmpty()) {
             return null;
         }
-        self.lock.store(0, .release);
+        self.lock.store(0, .seq_cst);
         const msg = self.messages[self.read_index];
         self.read_index += 1;
         if (self.read_index >= self.messages.len) {
             self.read_index = 0;
         }
-        if (self.read_index == self.write_index) {}
         return msg;
     }
 };
@@ -59,7 +58,7 @@ pub var state: State = .{};
 
 pub const State = struct {
     lock: std.Thread.RwLock = .{},
-    boxes: std.ArrayList([]const u8) = .empty,
+    boxes: std.MultiArrayList(mailbox.ImapSession.ListResult.Box) = .empty,
     data: Data = .{},
 
     const Data = struct {
@@ -109,33 +108,46 @@ pub fn worker(alloc: std.mem.Allocator, config: mailbox.Config) void {
 
     blk: {
         log.info("Authentication successful", .{});
-        const boxes = session.list("", "*") catch |err| {
+        const res = session.list(alloc, "", "*") catch |err| {
             std.log.err("Failed to list mailboxes: {}", .{err});
             break :blk;
         };
         state.lock.lock();
         defer state.lock.unlock();
-        state.boxes.clearRetainingCapacity();
-        for (boxes) |box| {
-            if (box.name.len > 0) {
-                state.boxes.append(box.name) catch |err| {
-                    std.log.err("Failed to append mailbox name: {}", .{err});
-                };
-            }
-        }
+        state.boxes = res.boxes;
     }
 
     while (true) {
+        const start = std.time.milliTimestamp();
         if (queue.pop(std.time.ns_per_s * 5)) |msg| {
+            const elapsed = std.time.milliTimestamp() - start;
+            log.info("Message received after {} ms: {}", .{ elapsed, msg });
             switch (msg) {
                 .logout => {
                     return;
                 },
             }
         } else {
+            const elapsed = std.time.milliTimestamp() - start;
+            log.info("No messages received after {} ms, sending NOOP", .{elapsed});
             session.noop() catch |err| {
                 log.err("Failed to send NOOP command: {}", .{err});
             };
         }
     }
+}
+
+test "Queue" {
+    var q = Queue{};
+
+    try std.testing.expect(q.isEmpty());
+
+    try std.testing.expectEqual(q.pop(10), null);
+    try q.push(.{ .logout = {} });
+    try std.testing.expect(!q.isEmpty());
+    const start = std.time.nanoTimestamp();
+    const msg = q.pop(10);
+    const elapsed = std.time.nanoTimestamp() - start;
+    try std.testing.expect(elapsed > 5);
+    try std.testing.expectEqual(msg.?, Message{ .logout = {} });
 }

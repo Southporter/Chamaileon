@@ -3,3 +3,9 @@ zig-out/
 *.o
 
 mise.toml
+
+*.log
+
+# JJ version control
+.jj/
+.crush/

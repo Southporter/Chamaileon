@@ -32,7 +32,10 @@ pub fn main() !void {
     const worker = try std.Thread.spawn(.{}, background.worker, .{ gpa, config });
     defer worker.join();
     try worker.setName("Mailbox Worker");
-    defer background.queue.pushImmediate(.logout);
+    defer {
+        log.info("Stopping worker thread", .{});
+        background.queue.pushImmediate(.logout);
+    }
 
     if (@import("builtin").os.tag == .windows) { // optional
         // on windows graphical apps have no console, so output goes to nowhere - attach it manually. related: https://github.com/ziglang/zig/issues/4196
@@ -185,4 +188,8 @@ fn gui_frame() void {
 
     // look at demo() for examples of dvui widgets, shows in a floating window
     dvui.Examples.demo();
+}
+
+test {
+    _ = @import("worker.zig");
 }
