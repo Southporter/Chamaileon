@@ -22,11 +22,6 @@ const Queue = struct {
         }
         self.lock.store(WAKE_VALUE, .seq_cst);
     }
-    pub fn pushImmediate(self: *Queue, msg: Message) void {
-        self.messages[self.read_index] = msg;
-        self.lock.store(WAKE_VALUE, .seq_cst);
-    }
-
     fn isEmpty(self: *Queue) bool {
         return self.read_index == self.write_index;
     }
@@ -50,6 +45,7 @@ const Queue = struct {
 
 const Message = union(enum) {
     logout: void,
+    select: mailbox.ImapSession.ListResult.Box,
 };
 
 pub var queue: Queue = .{};
@@ -68,7 +64,7 @@ pub const State = struct {
     };
 };
 
-pub fn worker(alloc: std.mem.Allocator, config: mailbox.Config) void {
+pub fn worker(alloc: std.mem.Allocator, config: mailbox.Config, running: *bool) void {
     log.info("Starting Mailbox Worker", .{});
     var ca_bundle = std.crypto.Certificate.Bundle{};
     defer ca_bundle.deinit(alloc);
@@ -117,7 +113,7 @@ pub fn worker(alloc: std.mem.Allocator, config: mailbox.Config) void {
         state.boxes = res.boxes;
     }
 
-    while (true) {
+    while (running.*) {
         const start = std.time.milliTimestamp();
         if (queue.pop(std.time.ns_per_s * 5)) |msg| {
             const elapsed = std.time.milliTimestamp() - start;
@@ -146,8 +142,32 @@ test "Queue" {
     try q.push(.{ .logout = {} });
     try std.testing.expect(!q.isEmpty());
     const start = std.time.nanoTimestamp();
-    const msg = q.pop(10);
+    const msg = q.pop(1000);
     const elapsed = std.time.nanoTimestamp() - start;
-    try std.testing.expect(elapsed > 5);
+    errdefer std.debug.print("Elapsed time: {d} ns\n", .{elapsed});
+    try std.testing.expect(elapsed < 500);
     try std.testing.expectEqual(msg.?, Message{ .logout = {} });
+
+    try std.testing.expect(q.isEmpty());
+    const start2 = std.time.nanoTimestamp();
+    const msg2 = q.pop(1000);
+    const elapsed2 = std.time.nanoTimestamp() - start2;
+    try std.testing.expectEqual(msg2, null);
+    try std.testing.expect(elapsed2 > 500);
+
+    try std.testing.expect(q.isEmpty());
+    const select = Message{
+        .select = mailbox.ImapSession.ListResult.Box{
+            .folder = "/",
+            .name = "INBOX",
+            .flags = .{},
+        },
+    };
+    try q.push(select);
+    try q.push(.{ .logout = {} });
+    const start3 = std.time.nanoTimestamp();
+    const msg3 = q.pop(1000);
+    const elapsed3 = std.time.nanoTimestamp() - start3;
+    try std.testing.expectEqual(msg3.?, select);
+    try std.testing.expect(elapsed3 < 500);
 }

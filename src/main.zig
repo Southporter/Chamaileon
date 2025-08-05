@@ -27,9 +27,11 @@ pub fn main() !void {
 
     defer if (gpa_instance.deinit() != .ok) @panic("Memory leak on exit!");
 
+    var running = true;
+
     const config = try Config.load(gpa);
     defer config.deinit(gpa);
-    const worker = try std.Thread.spawn(.{}, background.worker, .{ gpa, config });
+    const worker = try std.Thread.spawn(.{}, background.worker, .{ gpa, config, &running });
     defer worker.join();
     try worker.setName("Mailbox Worker");
     defer {
@@ -102,6 +104,8 @@ pub fn main() !void {
             dvui.dialog(@src(), .{}, .{ .window = &win, .modal = false, .title = "Dialog from Outside", .message = "This is a non modal dialog that was created outside win.begin()/win.end(), usually from another thread." });
         }
     }
+
+    running = false;
 }
 
 // both dvui and SDL drawing
