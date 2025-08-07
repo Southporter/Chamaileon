@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 const mailbox = @import("mailbox");
 const background = @import("worker.zig");
 const dvui = @import("dvui");
+const ui = @import("ui.zig");
 const Backend = dvui.backend;
 comptime {
     std.debug.assert(@hasDecl(Backend, "SDLBackend"));
@@ -27,18 +28,6 @@ pub fn main() !void {
 
     defer if (gpa_instance.deinit() != .ok) @panic("Memory leak on exit!");
 
-    var running = true;
-
-    const config = try Config.load(gpa);
-    defer config.deinit(gpa);
-    const worker = try std.Thread.spawn(.{}, background.worker, .{ gpa, config, &running });
-    defer worker.join();
-    try worker.setName("Mailbox Worker");
-    defer {
-        log.info("Stopping worker thread", .{});
-        background.queue.pushImmediate(.logout);
-    }
-
     if (@import("builtin").os.tag == .windows) { // optional
         // on windows graphical apps have no console, so output goes to nowhere - attach it manually. related: https://github.com/ziglang/zig/issues/4196
         dvui.Backend.Common.windowsAttachConsole() catch {};
@@ -61,6 +50,18 @@ pub fn main() !void {
     var win = try dvui.Window.init(@src(), gpa, backend.backend(), .{});
     defer win.deinit();
 
+    var running = true;
+
+    const config = try Config.load(gpa);
+    defer config.deinit(gpa);
+    const worker = try std.Thread.spawn(.{}, background.worker, .{ gpa, config, &running, &win });
+    defer worker.join();
+    try worker.setName("Mailbox Worker");
+    defer {
+        log.info("Stopping worker thread", .{});
+        background.queue.push(.logout) catch {};
+    }
+
     var interrupted = false;
 
     main_loop: while (true) {
@@ -81,7 +82,7 @@ pub fn main() !void {
         _ = Backend.c.SDL_RenderClear(backend.renderer);
 
         // The demos we pass in here show up under "Platform-specific demos"
-        gui_frame();
+        gui_frame(.mailbox_select);
 
         // marks end of dvui frame, don't call dvui functions after this
         // - sends all dvui stuff to backend for rendering, must be called before renderPresent()
@@ -108,88 +109,67 @@ pub fn main() !void {
     running = false;
 }
 
+const Page = enum {
+    mailbox_select,
+};
+
 // both dvui and SDL drawing
-fn gui_frame() void {
-    const events = dvui.events();
-    log.debug("Events: {any}", .{events});
-    {
-        var m = dvui.menu(@src(), .horizontal, .{ .background = true, .expand = .horizontal });
-        defer m.deinit();
+fn gui_frame(page: Page) void {
+    ui.menu();
 
-        if (dvui.menuItemLabel(@src(), "File", .{ .submenu = true }, .{ .expand = .none })) |r| {
-            var fw = dvui.floatingMenu(@src(), .{ .from = r }, .{});
-            defer fw.deinit();
-
-            if (dvui.menuItemLabel(@src(), "Close Menu", .{}, .{}) != null) {
-                m.close();
-            }
-        }
-
-        if (dvui.menuItemLabel(@src(), "Edit", .{ .submenu = true }, .{ .expand = .none })) |r| {
-            var fw = dvui.floatingMenu(@src(), .{ .from = r }, .{});
-            defer fw.deinit();
-            _ = dvui.menuItemLabel(@src(), "Dummy", .{}, .{ .expand = .horizontal });
-            _ = dvui.menuItemLabel(@src(), "Dummy Long", .{}, .{ .expand = .horizontal });
-            _ = dvui.menuItemLabel(@src(), "Dummy Super Long", .{}, .{ .expand = .horizontal });
-        }
-        if (dvui.menuItemLabel(@src(), "Demo", .{ .submenu = true }, .{ .expand = .none })) |r| {
-            var fw = dvui.floatingMenu(@src(), .{ .from = r }, .{});
-            defer fw.deinit();
-
-            const label = if (dvui.Examples.show_demo_window) "Hide Demo Window" else "Show Demo Window";
-            if (dvui.menuItemLabel(@src(), label, .{}, .{ .expand = .horizontal }) != null) {
-                dvui.Examples.show_demo_window = !dvui.Examples.show_demo_window;
-            }
-        }
+    switch (page) {
+        .mailbox_select => ui.mailbox_select(gpa, background.state) catch |err| {
+            std.log.err("Failed to render mailbox select: {}", .{err});
+        },
     }
 
-    var content = dvui.box(@src(), .horizontal, .{
-        .expand = .both,
-    });
-    defer content.deinit();
-
-    {
-        var list_view = dvui.scrollArea(@src(), .{
-            .horizontal = .auto,
-        }, .{
-            .expand = .vertical,
-            .color_fill = .fill_window,
-        });
-        defer list_view.deinit();
-
-        var arena = std.heap.ArenaAllocator.init(gpa);
-        defer arena.deinit();
-
-        for (0..10) |i| {
-            var item = dvui.box(@src(), .horizontal, .{ .expand = .horizontal, .min_size_content = .{ .h = 30 }, .margin = .{ .x = 4 }, .id_extra = i });
-            defer item.deinit();
-
-            if (dvui.button(@src(), std.fmt.allocPrint(arena.allocator(), "Button {d}", .{i}) catch return, .{}, .{ .id_extra = i })) {
-                std.log.info("Button {d} clicked", .{i});
-            }
-
-            dvui.label(@src(), "Item {d}", .{i}, .{ .id_extra = i });
-        }
-    }
-
-    {
-        var content_view = dvui.scrollArea(@src(), .{}, .{ .expand = .both });
-        defer content_view.deinit();
-
-        var text = dvui.textLayout(@src(), .{}, .{});
-        defer text.deinit();
-
-        text.addText(
-            \\ This is a test
-            \\ with a lot of extra text
-            \\ to show how text layout works in dvui.
-            \\ It can handle multiple lines
-            \\ and will automatically wrap text
-            \\ to fit the available space.
-            \\
-        , .{});
-    }
-
+    // var content = dvui.box(@src(), .horizontal, .{
+    //     .expand = .both,
+    // });
+    // defer content.deinit();
+    //
+    // {
+    //     var list_view = dvui.scrollArea(@src(), .{
+    //         .horizontal = .auto,
+    //     }, .{
+    //         .expand = .vertical,
+    //         .color_fill = .fill_window,
+    //     });
+    //     defer list_view.deinit();
+    //
+    //     var arena = std.heap.ArenaAllocator.init(gpa);
+    //     defer arena.deinit();
+    //
+    //     for (0..10) |i| {
+    //         var item = dvui.box(@src(), .horizontal, .{ .expand = .horizontal, .min_size_content = .{ .h = 30 }, .margin = .{ .x = 4 }, .id_extra = i });
+    //         defer item.deinit();
+    //
+    //         if (dvui.button(@src(), std.fmt.allocPrint(arena.allocator(), "Button {d}", .{i}) catch return, .{}, .{ .id_extra = i })) {
+    //             std.log.info("Button {d} clicked", .{i});
+    //         }
+    //
+    //         dvui.label(@src(), "Item {d}", .{i}, .{ .id_extra = i });
+    //     }
+    // }
+    //
+    // {
+    //     var content_view = dvui.scrollArea(@src(), .{}, .{ .expand = .both });
+    //     defer content_view.deinit();
+    //
+    //     var text = dvui.textLayout(@src(), .{}, .{});
+    //     defer text.deinit();
+    //
+    //     text.addText(
+    //         \\ This is a test
+    //         \\ with a lot of extra text
+    //         \\ to show how text layout works in dvui.
+    //         \\ It can handle multiple lines
+    //         \\ and will automatically wrap text
+    //         \\ to fit the available space.
+    //         \\
+    //     , .{});
+    // }
+    //
     // look at demo() for examples of dvui widgets, shows in a floating window
     dvui.Examples.demo();
 }

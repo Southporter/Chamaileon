@@ -1,14 +1,14 @@
 const std = @import("std");
 const mailbox = @import("mailbox");
 const log = std.log.scoped(.worker);
+const dvui = @import("dvui");
 
 const Queue = struct {
-    lock: std.atomic.Value(u32) = .init(0),
+    mutex: std.Thread.Mutex = .{},
+    cond: std.Thread.Condition = .{},
     messages: [8]Message = undefined,
     read_index: u8 = 0,
     write_index: u8 = 0,
-
-    const WAKE_VALUE: u32 = 3232;
 
     pub fn push(self: *Queue, msg: Message) !void {
         if (self.read_index == self.write_index + 1) {
@@ -20,7 +20,9 @@ const Queue = struct {
         if (self.write_index >= self.messages.len) {
             self.write_index = 0;
         }
-        self.lock.store(WAKE_VALUE, .seq_cst);
+        self.mutex.lock();
+        self.mutex.unlock();
+        self.cond.signal();
     }
     fn isEmpty(self: *Queue) bool {
         return self.read_index == self.write_index;
@@ -28,12 +30,13 @@ const Queue = struct {
 
     pub fn pop(self: *Queue, timeout: u64) ?Message {
         if (self.isEmpty()) {
-            std.Thread.Futex.timedWait(&self.lock, 0, timeout) catch {};
+            self.mutex.lock();
+            defer self.mutex.unlock();
+            self.cond.timedWait(&self.mutex, timeout) catch {};
         }
         if (self.isEmpty()) {
             return null;
         }
-        self.lock.store(0, .seq_cst);
         const msg = self.messages[self.read_index];
         self.read_index += 1;
         if (self.read_index >= self.messages.len) {
@@ -45,7 +48,7 @@ const Queue = struct {
 
 const Message = union(enum) {
     logout: void,
-    select: mailbox.ImapSession.ListResult.Box,
+    select: mailbox.ImapSession.Box,
 };
 
 pub var queue: Queue = .{};
@@ -54,7 +57,7 @@ pub var state: State = .{};
 
 pub const State = struct {
     lock: std.Thread.RwLock = .{},
-    boxes: std.MultiArrayList(mailbox.ImapSession.ListResult.Box) = .empty,
+    boxes: std.MultiArrayList(mailbox.ImapSession.Box) = .empty,
     data: Data = .{},
 
     const Data = struct {
@@ -64,7 +67,7 @@ pub const State = struct {
     };
 };
 
-pub fn worker(alloc: std.mem.Allocator, config: mailbox.Config, running: *bool) void {
+pub fn worker(alloc: std.mem.Allocator, config: mailbox.Config, running: *bool, win: *dvui.Window) void {
     log.info("Starting Mailbox Worker", .{});
     var ca_bundle = std.crypto.Certificate.Bundle{};
     defer ca_bundle.deinit(alloc);
@@ -102,25 +105,37 @@ pub fn worker(alloc: std.mem.Allocator, config: mailbox.Config, running: *bool) 
     };
     defer session.logout();
 
+    var box_arena = std.heap.ArenaAllocator.init(alloc);
     blk: {
         log.info("Authentication successful", .{});
-        const res = session.list(alloc, "", "*") catch |err| {
+        const res = session.list(box_arena.allocator(), "", "*") catch |err| {
             std.log.err("Failed to list mailboxes: {}", .{err});
             break :blk;
         };
         state.lock.lock();
-        defer state.lock.unlock();
         state.boxes = res.boxes;
+        state.lock.unlock();
+
+        dvui.refresh(win, @src(), @enumFromInt(13131313));
     }
+    defer box_arena.deinit();
 
     while (running.*) {
         const start = std.time.milliTimestamp();
-        if (queue.pop(std.time.ns_per_s * 5)) |msg| {
+        if (queue.pop(std.time.ns_per_min * 30)) |msg| {
             const elapsed = std.time.milliTimestamp() - start;
-            log.info("Message received after {} ms: {}", .{ elapsed, msg });
+            log.info("Message received after {d} ms: {any}", .{ elapsed, msg });
             switch (msg) {
                 .logout => {
                     return;
+                },
+                .select => {
+                    log.info("Selecting mailbox: {s}", .{msg.select.name});
+                    session.select(msg.select) catch |err| {
+                        log.err("Failed to select mailbox '{s}': {any}", .{ msg.select.name, err });
+                        continue;
+                    };
+                    log.info("Mailbox '{s}' selected successfully", .{msg.select.name});
                 },
             }
         } else {
@@ -157,7 +172,7 @@ test "Queue" {
 
     try std.testing.expect(q.isEmpty());
     const select = Message{
-        .select = mailbox.ImapSession.ListResult.Box{
+        .select = mailbox.ImapSession.Box{
             .folder = "/",
             .name = "INBOX",
             .flags = .{},
