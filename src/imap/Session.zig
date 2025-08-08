@@ -417,7 +417,6 @@ pub fn list(self: *Session, alloc: std.mem.Allocator, root: []const u8, pattern:
                     if (res.kind == .ok) {
                         log.info("LIST command completed successfully: {s}", .{res.value});
                         self.tag_id += 1;
-                        self.state = .selected;
                         list_result.boxes.shrinkAndFree(alloc, list_result.boxes.len);
                         return list_result;
                     } else if (res.kind == .no or res.kind == .bad) {
@@ -448,20 +447,136 @@ pub fn list(self: *Session, alloc: std.mem.Allocator, root: []const u8, pattern:
     return error.UnexpectedResponse; // If we reach here, something went wrong
 }
 
-pub fn select(self: *Session, mailbox: Box) !void {
+pub const MailboxDetails = struct {
+    exists: u32 = 0,
+    recent: u32 = 0,
+    slash_flags: std.EnumSet(Flags) = .initEmpty(),
+    dollar_flags: std.EnumSet(Flags) = .initEmpty(),
+    bare_flags: std.EnumSet(Flags) = .initEmpty(),
+    permanent_flags: std.EnumSet(Flags) = .initEmpty(),
+    unseen: u32 = 0,
+    uid_next: u32 = 0,
+    uid_validity: u32 = 0,
+    highest_mod_seq: u64 = 0,
+    status: enum { read_write, read_only } = .read_only,
+
+    pub const Flags = enum {
+        answered,
+        flagged,
+        draft,
+        deleted,
+        seen,
+        not_junk,
+        not_phishing,
+        phishing,
+        forwarded,
+        junk,
+        junk_recorded,
+        custom_flags,
+    };
+
+    fn parseFlags(self: *MailboxDetails, flags: []const u8) !void {
+        var iter = std.mem.tokenizeScalar(u8, flags, ' ');
+        while (iter.next()) |flag| {
+            var stripped = flag;
+
+            var result = switch (flag[0]) {
+                '\\' => &self.slash_flags,
+                '$' => &self.dollar_flags,
+                else => &self.bare_flags,
+            };
+            if (flag[0] == '\\' or flag[0] == '$') {
+                stripped = flag[1..]; // Skip the leading backslash
+            }
+            if (std.mem.eql(u8, stripped, "*")) {
+                result.insert(.custom_flags);
+                continue;
+            }
+            if (std.mem.eql(u8, stripped, "Answered")) {
+                result.insert(.answered);
+            } else if (std.mem.eql(u8, stripped, "Flagged")) {
+                result.insert(.flagged);
+            } else if (std.mem.eql(u8, stripped, "Draft")) {
+                result.insert(.draft);
+            } else if (std.mem.eql(u8, stripped, "Deleted")) {
+                result.insert(.deleted);
+            } else if (std.mem.eql(u8, stripped, "Seen")) {
+                result.insert(.seen);
+            } else if (std.mem.eql(u8, stripped, "NotJunk")) {
+                result.insert(.not_junk);
+            } else if (std.mem.eql(u8, stripped, "NotPhishing")) {
+                result.insert(.not_phishing);
+            } else if (std.mem.eql(u8, stripped, "Phishing")) {
+                result.insert(.phishing);
+            } else if (std.mem.eql(u8, stripped, "Forwarded")) {
+                result.insert(.forwarded);
+            } else if (std.mem.eql(u8, stripped, "Junk")) {
+                result.insert(.junk);
+            } else if (std.mem.eql(u8, stripped, "JunkRecorded")) {
+                result.insert(.junk_recorded);
+            } else {
+                log.warn("Unknown mailbox flag: {s}", .{flag});
+            }
+        }
+    }
+    fn parsePermanentFlags(self: *MailboxDetails, flags: []const u8) !void {
+        var result = self.permanent_flags;
+        var iter = std.mem.tokenizeScalar(u8, flags, ' ');
+        while (iter.next()) |flag| {
+            var stripped = flag;
+
+            if (flag[0] == '\\' or flag[0] == '$') {
+                stripped = flag[1..]; // Skip the leading backslash
+            }
+            if (std.mem.eql(u8, stripped, "*")) {
+                result.insert(.custom_flags);
+                continue;
+            }
+            if (std.mem.eql(u8, stripped, "Answered")) {
+                result.insert(.answered);
+            } else if (std.mem.eql(u8, stripped, "Flagged")) {
+                result.insert(.flagged);
+            } else if (std.mem.eql(u8, stripped, "Draft")) {
+                result.insert(.draft);
+            } else if (std.mem.eql(u8, stripped, "Deleted")) {
+                result.insert(.deleted);
+            } else if (std.mem.eql(u8, stripped, "Seen")) {
+                result.insert(.seen);
+            } else if (std.mem.eql(u8, stripped, "NotJunk")) {
+                result.insert(.not_junk);
+            } else if (std.mem.eql(u8, stripped, "NotPhishing")) {
+                result.insert(.not_phishing);
+            } else if (std.mem.eql(u8, stripped, "Phishing")) {
+                result.insert(.phishing);
+            } else if (std.mem.eql(u8, stripped, "Forwarded")) {
+                result.insert(.forwarded);
+            } else if (std.mem.eql(u8, stripped, "Junk")) {
+                result.insert(.junk);
+            } else if (std.mem.eql(u8, stripped, "JunkRecorded")) {
+                result.insert(.junk_recorded);
+            } else {
+                log.warn("Unknown mailbox flag: {s}", .{flag});
+            }
+        }
+    }
+};
+
+pub fn select(self: *Session, mailbox: Box) !MailboxDetails {
+    log.debug("Selecting in state: {s}", .{@tagName(self.state)});
     if (self.state != .authenticated) {
         return error.InvalidState;
     }
     var tag_buf: [4]u8 = undefined;
     const tag = std.fmt.bufPrint(&tag_buf, "S{d:0>3}", .{self.tag_id}) catch unreachable;
     var select_buf: [1024]u8 = undefined;
-    try self.tls.writeAll(self.socket, std.fmt.bufPrint(&select_buf, "{s} SELECT {s} {s}\r\n", .{ tag, mailbox.folder, mailbox.name }) catch unreachable);
+    try self.tls.writeAll(self.socket, std.fmt.bufPrint(&select_buf, "{s} SELECT {s}\r\n", .{ tag, mailbox.name }) catch unreachable);
 
     var read_more = true;
     var parser = ResponseParser{
         .tag = tag,
         .buffer = &select_buf,
     };
+    var mailbox_details = MailboxDetails{};
     while (read_more) {
         const read = self.tls.read(self.socket, select_buf[parser.offset..]) catch |err| {
             log.err("Failed to read from IMAP server after SELECT command: {}", .{err});
@@ -476,7 +591,56 @@ pub fn select(self: *Session, mailbox: Box) !void {
                     if (std.mem.eql(u8, res.kind, "EXISTS") or std.mem.eql(u8, res.kind, "RECENT")) {
                         log.info("Mailbox {s} has {s}", .{ mailbox.name, res.value });
                     } else if (std.mem.eql(u8, res.kind, "FLAGS")) {
-                        log.info("Mailbox {s} flags: {s}", .{ mailbox.name, res.value });
+                        std.debug.assert(res.value[0] == '(' and res.value[res.value.len - 1] == ')');
+                        mailbox_details.parseFlags(res.value[1 .. res.value.len - 1]) catch |err| {
+                            log.err("Failed to parse flags from SELECT response: {s}", .{res.value});
+                            return err;
+                        };
+                    } else if (std.mem.eql(u8, res.kind, "OK")) {
+                        log.info("Mailbox {s} OK: {s}", .{ mailbox.name, res.value });
+                        const PERMANENTFLAGS = "[PERMANENTFLAGS (";
+                        const UIDNEXT = "[UIDNEXT ";
+                        const UIDVALIDITY = "[UIDVALIDITY ";
+                        const HIGHESTMODSEQ = "[HIGHESTMODSEQ ";
+                        if (std.mem.startsWith(u8, res.value, PERMANENTFLAGS)) {
+                            const flags_start = res.value[PERMANENTFLAGS.len..];
+                            const flags_end = std.mem.indexOfScalar(u8, flags_start, ')') orelse return error.UnexpectedResponse;
+                            mailbox_details.parsePermanentFlags(flags_start[0..flags_end]) catch |err| {
+                                log.err("Failed to parse permanent flags from SELECT response: {s}", .{res.value});
+                                return err;
+                            };
+                        } else if (std.mem.startsWith(u8, res.value, UIDNEXT)) {
+                            const value_start = UIDNEXT.len;
+                            const value_end = std.mem.indexOfScalar(u8, res.value[value_start..], ']') orelse return error.UnexpectedResponse;
+                            mailbox_details.uid_next = std.fmt.parseInt(u32, res.value[value_start..value_end], 10) catch {
+                                log.err("Failed to parse UIDNEXT from SELECT response: {s}", .{res.value});
+                                return error.UnexpectedResponse;
+                            };
+                        } else if (std.mem.startsWith(u8, res.value, UIDVALIDITY)) {
+                            const value_start = UIDVALIDITY.len;
+                            const value_end = std.mem.indexOfScalar(u8, res.value[value_start..], ']') orelse return error.UnexpectedResponse;
+                            mailbox_details.uid_validity = std.fmt.parseInt(u32, res.value[value_start..value_end], 10) catch {
+                                log.err("Failed to parse UIDNEXT from SELECT response: {s}", .{res.value});
+                                return error.UnexpectedResponse;
+                            };
+                        } else if (std.mem.startsWith(u8, res.value, HIGHESTMODSEQ)) {
+                            const value_start = HIGHESTMODSEQ.len;
+                            const value_end = std.mem.indexOfScalar(u8, res.value[value_start..], ']') orelse return error.UnexpectedResponse;
+                            mailbox_details.highest_mod_seq = std.fmt.parseInt(u64, res.value[value_start..value_end], 10) catch {
+                                log.err("Failed to parse UIDNEXT from SELECT response: {s}", .{res.value});
+                                return error.UnexpectedResponse;
+                            };
+                        }
+                    } else if (res.kind[0] >= '0' and res.kind[0] <= '9') {
+                        const num = std.fmt.parseInt(u32, res.kind, 10) catch {
+                            log.err("Failed to parse numeric untagged response: {s} {s}", .{ res.kind, res.value });
+                            return error.UnexpectedResponse;
+                        };
+                        if (std.mem.eql(u8, res.value, "EXISTS")) {
+                            mailbox_details.exists = num;
+                        } else if (std.mem.eql(u8, res.value, "RECENT")) {
+                            mailbox_details.recent = num;
+                        }
                     } else {
                         log.err("Unexpected untagged response: {s} {s}", .{ res.kind, res.value });
                         return error.UnexpectedResponse;
@@ -486,9 +650,16 @@ pub fn select(self: *Session, mailbox: Box) !void {
                     log.debug("Tagged response: {s} {s}", .{ @tagName(res.kind), res.value });
                     if (res.kind == .ok) {
                         log.info("SELECT command completed successfully for mailbox {s}: {s}", .{ mailbox.name, res.value });
+                        if (std.mem.startsWith(u8, res.value, "[READ-WRITE]")) {
+                            mailbox_details.status = .read_write;
+                        } else if (std.mem.startsWith(u8, res.value, "[READ-ONLY]")) {
+                            mailbox_details.status = .read_only;
+                        } else {
+                            log.warn("Unexpected mailbox status in SELECT response: {s}", .{res.value});
+                        }
                         self.tag_id += 1;
                         self.state = .selected;
-                        return;
+                        return mailbox_details;
                     } else if (res.kind == .no or res.kind == .bad) {
                         log.err("SELECT command failed for mailbox {s}: {s}", .{ mailbox.name, res.value });
                         return error.SelectFailed;
@@ -514,4 +685,5 @@ pub fn select(self: *Session, mailbox: Box) !void {
             }
         }
     }
+    return error.UnexpectedResponse; // If we reach here, something went wrong
 }

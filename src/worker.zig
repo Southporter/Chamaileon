@@ -59,6 +59,7 @@ pub const State = struct {
     lock: std.Thread.RwLock = .{},
     boxes: std.MultiArrayList(mailbox.ImapSession.Box) = .empty,
     data: Data = .{},
+    details: ?mailbox.ImapSession.MailboxDetails = null,
 
     const Data = struct {
         host: []const u8 = "",
@@ -131,11 +132,14 @@ pub fn worker(alloc: std.mem.Allocator, config: mailbox.Config, running: *bool, 
                 },
                 .select => {
                     log.info("Selecting mailbox: {s}", .{msg.select.name});
-                    session.select(msg.select) catch |err| {
+                    const details = session.select(msg.select) catch |err| {
                         log.err("Failed to select mailbox '{s}': {any}", .{ msg.select.name, err });
                         continue;
                     };
                     log.info("Mailbox '{s}' selected successfully", .{msg.select.name});
+                    state.lock.lock();
+                    defer state.lock.unlock();
+                    state.details = details;
                 },
             }
         } else {
