@@ -4,6 +4,8 @@ const known_folders = @import("known-folders");
 
 username: []const u8,
 password: []const u8,
+hostname: []const u8 = "imap.gmail.com",
+port: u16 = 993,
 
 pub fn load(allocator: std.mem.Allocator) !Config {
     var arena = std.heap.ArenaAllocator.init(allocator);
@@ -23,15 +25,21 @@ pub fn load(allocator: std.mem.Allocator) !Config {
             },
             else => return err,
         };
+        const bytes = try alloc.alloc(u8, local_config.username.len + local_config.password.len + local_config.hostname.len);
+        @memcpy(bytes[0..local_config.username.len], local_config.username);
+        @memcpy(bytes[local_config.username.len .. local_config.username.len + local_config.password.len], local_config.password);
+        @memcpy(bytes[local_config.username.len + local_config.password.len ..], local_config.hostname);
         return .{
-            .username = allocator.dupe(u8, local_config.username) catch return error.OutOfMemory,
-            .password = allocator.dupe(u8, local_config.password) catch return error.OutOfMemory,
+            .username = bytes[0..local_config.username.len],
+            .password = bytes[local_config.username.len .. local_config.username.len + local_config.password.len],
+            .hostname = bytes[local_config.username.len + local_config.password.len ..],
+            .port = local_config.port,
         };
     }
     return error.HomeDirNotFound;
 }
 
 pub fn deinit(self: Config, allocator: std.mem.Allocator) void {
-    allocator.free(self.username);
-    allocator.free(self.password);
+    const bytes = self.username.ptr[0 .. self.username.len + self.password.len + self.hostname.len];
+    allocator.free(bytes);
 }

@@ -13,6 +13,11 @@ pub fn build(b: *std.Build) void {
 
     const known_folders = b.dependency("known_folders", .{}).module("known-folders");
     lib_mod.addImport("known-folders", known_folders);
+    const zeit = b.dependency("zeit", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    lib_mod.addImport("zeit", zeit.module("zeit"));
 
     const exe_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),

@@ -62,8 +62,6 @@ pub const State = struct {
     details: ?mailbox.ImapSession.MailboxDetails = null,
 
     const Data = struct {
-        host: []const u8 = "",
-        port: usize = 993,
         details: []const u8 = "",
     };
 };
@@ -78,10 +76,15 @@ pub fn worker(alloc: std.mem.Allocator, config: mailbox.Config, running: *bool, 
     };
 
     log.info("Connecting to the server", .{});
-    var session = mailbox.ImapSession.connectTls(alloc, .{
-        .host = "imap.gmail.com",
+
+    var session = if (config.port == 993) mailbox.ImapSession.connectTls(alloc, .{
+        .host = config.hostname,
+        .port = config.port,
         .ca_bundle = ca_bundle,
     }) catch |err| {
+        std.log.err("Failed to connect to IMAP server: {}", .{err});
+        return;
+    } else mailbox.ImapSession.connect(alloc, .{ .host = config.hostname, .port = config.port, .ca_bundle = undefined }) catch |err| {
         std.log.err("Failed to connect to IMAP server: {}", .{err});
         return;
     };
@@ -89,10 +92,23 @@ pub fn worker(alloc: std.mem.Allocator, config: mailbox.Config, running: *bool, 
     {
         state.lock.lock();
         defer state.lock.unlock();
-
-        state.data.host = "imap.gmail.com";
-        state.data.port = 993;
         state.data.details = session.info;
+    }
+    if (config.port != 993) {
+        log.info("Server supports STARTTLS", .{});
+        // TODO: Check capabilities before starting TLS
+        session.startTls(.{ .host = config.hostname, .port = config.port, .ca_bundle = ca_bundle }) catch |err| {
+            std.log.err("Failed to start TLS: {}", .{err});
+            return;
+        };
+    }
+    const cap = session.capability(alloc) catch |err| {
+        std.log.err("Failed to get server capabilities: {}", .{err});
+        return;
+    };
+    if (!cap.has(.auth_plain)) {
+        std.log.err("Server does not support PLAIN authentication", .{});
+        return;
     }
 
     log.info("Authenticating", .{});
@@ -140,6 +156,14 @@ pub fn worker(alloc: std.mem.Allocator, config: mailbox.Config, running: *bool, 
                     state.lock.lock();
                     defer state.lock.unlock();
                     state.details = details;
+
+                    log.info("Fetching mailbox details for '{f}'", .{details});
+                    // const preview = session.preview(alloc, .{ .min = 1, .max = details.exists }) catch |err| {
+                    //     log.err("Failed to fetch mailbox details: {}", .{err});
+                    //     continue;
+                    // };
+
+                    // log.info("Fetched mailbox details for '{f}'", .{preview});
                 },
             }
         } else {

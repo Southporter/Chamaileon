@@ -6,6 +6,7 @@ pub const Capability = enum(u16) {
     auth_plain,
     auth_login,
     auth_xoauth2,
+    starttls,
     _,
 };
 
@@ -41,6 +42,8 @@ pub fn parseCapabilities(alloc: std.mem.Allocator, cap_str: []const u8) !Capabil
             capabilities.tags.insert(.login);
         } else if (std.mem.eql(u8, name, "LOGINDISABLED")) {
             capabilities.tags.insert(.login_disabled);
+        } else if (std.mem.eql(u8, name, "STARTTLS")) {
+            capabilities.tags.insert(.starttls);
         } else {
             var i: u32 = 0;
             while (capabilities.tags.contains(@enumFromInt(i))) : (i += 1) {}
@@ -54,6 +57,10 @@ pub fn parseCapabilities(alloc: std.mem.Allocator, cap_str: []const u8) !Capabil
         }
     }
     return capabilities;
+}
+
+pub fn has(self: Capabilities, cap: Capability) bool {
+    return self.tags.contains(cap);
 }
 
 test "capabilities" {

@@ -1,10 +1,13 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const log = std.log.scoped(.mailbox);
+const zeit = @import("zeit");
 
 const Session = @This();
 const Capabilities = @import("Capability.zig");
 const ResponseParser = @import("ResponseParser.zig");
+const Tokenizer = @import("tokenize.zig").Tokenizer;
+const Parser = @import("Parser.zig");
 
 socket: std.net.Stream,
 tls: std.crypto.tls.Client,
@@ -35,6 +38,18 @@ pub fn disconnect(self: *Session, alloc: std.mem.Allocator) void {
     self.capabilities.deinit(alloc);
     alloc.free(self.info);
     self.state = .disconnected;
+}
+
+pub fn connect(alloc: std.mem.Allocator, options: ConnectOptions) !Session {
+    const socket = try std.net.tcpConnectToHost(alloc, options.host, if (options.port == 0) 143 else options.port);
+    log.info("Connecting to IMAP server at {s}:{d}", .{ options.host, options.port });
+
+    var buffer: [256]u8 = undefined;
+    const read = try socket.read(&buffer);
+    if (std.debug.runtime_safety) std.debug.assert(std.mem.eql(u8, buffer[read - 2 .. read], "\r\n"));
+    log.info("Connected to IMAP server: {s}", .{buffer[0..read]});
+
+    return Session{ .socket = socket, .tls = undefined, .state = .connected, .info = try alloc.dupe(u8, buffer[0 .. read - 2]) };
 }
 
 pub fn connectTls(alloc: std.mem.Allocator, options: ConnectOptions) !Session {
@@ -144,16 +159,26 @@ pub fn capability(self: *Session, alloc: std.mem.Allocator) !Capabilities {
     const tag = std.fmt.bufPrint(&tag_buf, "S{d:0>3}", .{self.tag_id}) catch unreachable;
     var cap_buf: [1024]u8 = undefined;
     try self.tls.writeAll(self.socket, std.fmt.bufPrint(&cap_buf, "{s} CAPABILITY\r\n", .{tag}) catch unreachable);
-    const read = try self.tls.read(self.socket, &cap_buf) catch |err| {
+    const read = self.tls.read(self.socket, &cap_buf) catch |err| {
         log.err("Failed to read from IMAP server after capability command: {}", .{err});
         return err;
     };
+    log.info("Received CAPABILITY response: {s}", .{cap_buf[0..read]});
+
+    cap_buf[read] = 0;
+
+    var parser = Parser.init(cap_buf[0 .. read + 1 :0]);
+
+    try parser.expect(.asterisk);
+    try parser.expectIdentifier("CAPABILITY");
     const CAP_UNTAGGED = "* CAPABILITY ";
     if (!std.mem.startsWith(u8, cap_buf[0..CAP_UNTAGGED.len], CAP_UNTAGGED)) {
         log.err("Unexpected response from IMAP server: {s}", .{cap_buf[0..read]});
         return error.UnexpectedResponse;
     }
     const cap_end = std.mem.indexOfScalar(u8, cap_buf[CAP_UNTAGGED.len..read], '\r') orelse return error.UnexpectedResponse;
+
+    log.info("Parsing capabilities: {s}", .{cap_buf[CAP_UNTAGGED.len..cap_end]});
 
     self.capabilities.deinit(alloc);
     self.capabilities = try Capabilities.parseCapabilities(alloc, cap_buf[CAP_UNTAGGED.len..cap_end]);
@@ -166,6 +191,45 @@ pub fn capability(self: *Session, alloc: std.mem.Allocator) !Capabilities {
     self.state = .authenticated;
     self.tag_id += 1;
     return self.capabilities;
+}
+
+pub fn startTls(self: *Session, config: ConnectOptions) !void {
+    if (self.state != .connected) {
+        return error.InvalidState;
+    }
+    var tag_buf: [4]u8 = undefined;
+    const tag = std.fmt.bufPrint(&tag_buf, "S{d:0>3}", .{self.tag_id}) catch unreachable;
+    var starttls_buf: [256]u8 = undefined;
+    try self.socket.writeAll(std.fmt.bufPrint(&starttls_buf, "{s} STARTTLS\r\n", .{tag}) catch unreachable);
+    log.info("StartTLS with server at {s}:{d}", .{ config.host, config.port });
+    const read = self.socket.read(&starttls_buf) catch |err| {
+        log.err("Failed to read from IMAP server after STARTTLS command: {}", .{err});
+        return err;
+    };
+    if (!std.mem.startsWith(u8, starttls_buf[0..read], tag)) {
+        log.err("Unexpected response from IMAP server: {s}", .{starttls_buf[0..read]});
+        return error.UnexpectedResponse;
+    }
+    var parser = ResponseParser{
+        .tag = tag,
+        .buffer = starttls_buf[0..read],
+    };
+    const cap = parser.next() orelse return error.UnexpectedResponse;
+    if (cap.tagged.kind != .ok) {
+        log.err("STARTTLS command failed: {s}", .{cap.tagged.value});
+        return error.StartTlsFailed;
+    }
+
+    self.tls = try std.crypto.tls.Client.init(self.socket, .{
+        // TODO: Add support for explicit host verification
+        .host = .{ .no_verification = {} },
+        .ca = .{ .self_signed = {} },
+        // .ca = .{ .bundle = config.ca_bundle },
+    });
+
+    self.state = .connected;
+    self.tag_id = 1;
+    return;
 }
 
 pub fn login(self: *Session, username: []const u8, password: []const u8) !void {
@@ -199,6 +263,7 @@ pub fn authenticatePlain(self: *Session, alloc: std.mem.Allocator, username: []c
         return err;
     };
     if (std.mem.eql(u8, auth_buf[0..read], "+\r\n")) {
+        log.err("IMAP server does not support PLAIN authentication", .{});
         return error.UnexpectedResponse;
     }
 
@@ -475,6 +540,17 @@ pub const MailboxDetails = struct {
         custom_flags,
     };
 
+    pub fn format(value: *const MailboxDetails, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
+        _ = fmt;
+        _ = options;
+        try writer.print("MailboxDetails: ({d} total, {d} recent, {d} unseen, {d} next uid }}", .{
+            value.exists,
+            value.recent,
+            value.unseen,
+            value.uid_next,
+        });
+    }
+
     fn parseFlags(self: *MailboxDetails, flags: []const u8) !void {
         var iter = std.mem.tokenizeScalar(u8, flags, ' ');
         while (iter.next()) |flag| {
@@ -611,21 +687,21 @@ pub fn select(self: *Session, mailbox: Box) !MailboxDetails {
                             };
                         } else if (std.mem.startsWith(u8, res.value, UIDNEXT)) {
                             const value_start = UIDNEXT.len;
-                            const value_end = std.mem.indexOfScalar(u8, res.value[value_start..], ']') orelse return error.UnexpectedResponse;
+                            const value_end = std.mem.indexOfScalarPos(u8, res.value, value_start, ']') orelse return error.UnexpectedResponse;
                             mailbox_details.uid_next = std.fmt.parseInt(u32, res.value[value_start..value_end], 10) catch {
                                 log.err("Failed to parse UIDNEXT from SELECT response: {s}", .{res.value});
                                 return error.UnexpectedResponse;
                             };
                         } else if (std.mem.startsWith(u8, res.value, UIDVALIDITY)) {
                             const value_start = UIDVALIDITY.len;
-                            const value_end = std.mem.indexOfScalar(u8, res.value[value_start..], ']') orelse return error.UnexpectedResponse;
+                            const value_end = std.mem.indexOfScalarPos(u8, res.value, value_start, ']') orelse return error.UnexpectedResponse;
                             mailbox_details.uid_validity = std.fmt.parseInt(u32, res.value[value_start..value_end], 10) catch {
                                 log.err("Failed to parse UIDNEXT from SELECT response: {s}", .{res.value});
                                 return error.UnexpectedResponse;
                             };
                         } else if (std.mem.startsWith(u8, res.value, HIGHESTMODSEQ)) {
                             const value_start = HIGHESTMODSEQ.len;
-                            const value_end = std.mem.indexOfScalar(u8, res.value[value_start..], ']') orelse return error.UnexpectedResponse;
+                            const value_end = std.mem.indexOfScalarPos(u8, res.value, value_start, ']') orelse return error.UnexpectedResponse;
                             mailbox_details.highest_mod_seq = std.fmt.parseInt(u64, res.value[value_start..value_end], 10) catch {
                                 log.err("Failed to parse UIDNEXT from SELECT response: {s}", .{res.value});
                                 return error.UnexpectedResponse;
@@ -683,6 +759,143 @@ pub fn select(self: *Session, mailbox: Box) !MailboxDetails {
                     log.debug("Continuing to read more data from IMAP server", .{});
                 },
             }
+        }
+    }
+    return error.UnexpectedResponse; // If we reach here, something went wrong
+}
+
+pub const Range = struct {
+    min: u32 = 0,
+    max: u32 = 0,
+};
+
+pub const PreviewResult = struct {
+    mail: std.ArrayListUnmanaged(Preview) = .empty,
+
+    pub const Preview = struct {
+        uid: u32 = 0,
+        flags: std.EnumSet(MailboxDetails.Flags) = .initEmpty(),
+        from: []const u8 = "",
+        subject: []const u8 = "",
+        date: zeit.Instant,
+
+        pub fn deinit(self: *Preview, alloc: std.mem.Allocator) void {
+            self.headers.deinit(alloc);
+            alloc.free(self.body);
+            self.flags = .initEmpty();
+        }
+    };
+
+    pub fn deinit(self: *PreviewResult, alloc: std.mem.Allocator) void {
+        for (self.mail.items) |mail| {
+            mail.deinit(alloc);
+        }
+        self.mail.deinit(alloc);
+    }
+
+    pub fn format(
+        self: PreviewResult,
+        comptime fmt: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = fmt;
+        _ = options;
+        try writer.print("PeekResult: {d} items 0_0", .{
+            self.mail.items.len,
+        });
+    }
+};
+
+pub fn preview(self: *Session, alloc: std.mem.Allocator, range: Range) !PreviewResult {
+    var tag_buf: [4]u8 = undefined;
+    const tag = std.fmt.bufPrint(&tag_buf, "S{d:0>3}", .{self.tag_id}) catch unreachable;
+
+    var fetch_buf: [1024]u8 = undefined;
+    try self.tls.writeAll(self.socket, std.fmt.bufPrint(&fetch_buf, "{s} FETCH {d}:{d} (FLAGS BODY.PEEK[HEADER.FIELDS (Subject From Date)])\r\n", .{ tag, range.min, range.max }) catch unreachable);
+
+    var read_more = true;
+    var parser = ResponseParser{
+        .tag = tag,
+        .buffer = &fetch_buf,
+    };
+
+    var peek_result = PreviewResult{};
+    while (read_more) {
+        const read = self.tls.read(self.socket, fetch_buf[parser.offset..]) catch |err| {
+            log.err("Failed to read from IMAP server after SELECT command: {}", .{err});
+            return err;
+        };
+        parser.buffer = fetch_buf[parser.offset .. read + parser.offset];
+
+        while (parser.next()) |line| {
+            switch (line) {
+                .untagged => |res| {
+                    var mail = try peek_result.mail.addOne(alloc);
+                    mail.uid = try std.fmt.parseInt(u32, res.kind, 10);
+                    log.debug("Untagged response: {s} {s}", .{ res.kind, res.value });
+                    // * 2 FETCH (FLAGS (NonJunk \Seen) BODY[HEADER.FIELDS (From Subject Date)] {196}
+                    // Date: Tue, 27 May 2025 19:47:50 +0000
+                    // Subject: Document shared with you: "Estimation Model Approaches for Solutions"
+                    // From: "Ryan Gross (via Google Docs)" <drive-shares-dm-noreply@google.com>
+                    //
+                    // )
+                    var stream = std.io.fixedBufferStream(res.value);
+                    var reader = stream.reader();
+                    reader.skipUntilDelimiterOrEof("\n") catch |err| {
+                        log.err("Failed to read from IMAP server after FETCH command: {}", .{err});
+                        return err;
+                    };
+                    while (res.value[reader.context.pos] != '\r' and res.value[reader.context.pos + 1] != '\n') {
+                        var header_buf: [16]u8 = undefined;
+                        const header = try reader.readUntilDelimiterOrEof(&header_buf, ':');
+                        if (header) |h| {
+                            try reader.skipBytes(2); // Skip ': '
+                            if (std.mem.eql(u8, h, "Subject")) {
+                                mail.subject = try alloc.dupe(u8, res.value[reader.context.pos + 1 ..]);
+                            } else if (std.mem.eql(u8, h, "From")) {
+                                mail.from = try alloc.dupe(u8, res.value[reader.context.pos + 1 ..]);
+                            } else if (std.mem.eql(u8, h, "Date")) {
+                                mail.date = try zeit.instant(.{ .source = .{ .rfc2822 = res.value[reader.context.pos + 1 ..] } });
+                            } else {
+                                log.warn("Unknown header in FETCH response: {s}", .{h});
+                                return error.UnexpectedResponse;
+                            }
+                        } else {
+                            log.err("Failed to read header from FETCH response: {s}", .{res.value});
+                            return error.UnexpectedResponse;
+                        }
+                    }
+                },
+                .tagged => |res| {
+                    switch (res.kind) {
+                        .ok => {
+                            log.info("FETCH command completed successfully: {s}", .{res.value});
+                            self.tag_id += 1;
+                            return peek_result;
+                        },
+                        .no, .bad => {
+                            log.err("FETCH command failed: {s}", .{res.value});
+                            return error.FetchFailed;
+                        },
+                    }
+                },
+            }
+        }
+
+        switch (parser.state) {
+            .err => {
+                log.err("Parser is in error state, cannot continue", .{});
+                read_more = false;
+            },
+            .end => {
+                read_more = false;
+            },
+            else => {
+                std.mem.copyForwards(u8, fetch_buf[0..(read - parser.offset)], fetch_buf[parser.offset..read]);
+                parser.offset = 0;
+                log.debug("Continuing to read more data from IMAP server", .{});
+            },
         }
     }
     return error.UnexpectedResponse; // If we reach here, something went wrong

@@ -44,6 +44,10 @@
             .url = "git+https://github.com/ziglibs/known-folders.git#92defaee76b07487769ca352fd0ba95bc8b42a2f",
             .hash = "known_folders-0.0.0-Fy-PJkfRAAAVdptXWXBspIIC7EkVgLgWozU5zIk5Zgcy",
         },
+        .zeit = .{
+            .url = "git+https://github.com/rockorager/zeit.git#991f38266f86535e68431675e8feb84efa1f011b",
+            .hash = "zeit-0.6.0-5I6bk0t7AgCPM_cY1DoqJB2pnmG7MMtpdO5IxNpryJDy",
+        },
     },
     .paths = .{
         "build.zig",
