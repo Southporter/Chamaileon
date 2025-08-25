@@ -55,6 +55,8 @@ pub const Token = struct {
         string,
         asterisk,
         period,
+        plus,
+        eql,
         l_brace,
         r_brace,
         l_paren,
@@ -192,6 +194,14 @@ pub const Tokenizer = struct {
                 },
                 '.' => {
                     result.tag = .period;
+                    self.index += 1;
+                },
+                '=' => {
+                    result.tag = .eql;
+                    self.index += 1;
+                },
+                '+' => {
+                    result.tag = .plus;
                     self.index += 1;
                 },
                 '\\' => continue :state .backslash,
@@ -345,6 +355,7 @@ pub const Tokenizer = struct {
                 }
             },
         }
+        result.end = self.index;
         return result;
     }
 };

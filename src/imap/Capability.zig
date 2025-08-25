@@ -1,4 +1,6 @@
 const std = @import("std");
+const Parser = @import("Parser.zig");
+const log = std.log.scoped(.capability);
 
 pub const Capability = enum(u16) {
     login = 16,
@@ -26,6 +28,49 @@ pub fn empty() Capabilities {
 
 pub fn deinit(self: *Capabilities, alloc: std.mem.Allocator) void {
     self.interned.deinit(alloc);
+    self.interned = .empty;
+}
+
+pub fn parse(self: *Capabilities, alloc: std.mem.Allocator, parser: *Parser) !void {
+    while (parser.not(.crlf)) {
+        if (parser.peek()) |token| {
+            if (token.tag == .keyword_starttls) {
+                parser.expect(.keyword_starttls) catch {};
+                self.tags.insert(.starttls);
+                continue;
+            }
+        }
+        const name = try parser.get(.identifier);
+        log.debug("Capability: {s}", .{name});
+        if (std.mem.eql(u8, name, "AUTH")) {
+            try parser.expect(.eql);
+            const kind = try parser.get(.identifier);
+            if (std.mem.eql(u8, kind, "PLAIN")) {
+                self.tags.insert(.auth_plain);
+            } else if (std.mem.eql(u8, kind, "LOGIN")) {
+                self.tags.insert(.auth_login);
+            } else if (std.mem.eql(u8, kind, "XOAUTH2")) {
+                self.tags.insert(.auth_xoauth2);
+            } else {
+                return error.UnknownAuthMechanism;
+            }
+        } else if (std.mem.eql(u8, name, "LOGIN")) {
+            self.tags.insert(.login);
+        } else if (std.mem.eql(u8, name, "LOGINDISABLED")) {
+            self.tags.insert(.login_disabled);
+        } else {
+            var i: u32 = 0;
+            while (self.tags.contains(@enumFromInt(i))) : (i += 1) {}
+            if (i >= self.extra.len) {
+                return error.ExtraCapabilitiesFull;
+            }
+            const start = self.interned.items.len;
+            try self.interned.appendSlice(alloc, name);
+            try self.interned.append(alloc, 0); // Null-terminate
+            self.extra[i] = start;
+        }
+    }
+    return parser.expect(.crlf);
 }
 
 pub fn parseCapabilities(alloc: std.mem.Allocator, cap_str: []const u8) !Capabilities {

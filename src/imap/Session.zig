@@ -167,28 +167,19 @@ pub fn capability(self: *Session, alloc: std.mem.Allocator) !Capabilities {
 
     cap_buf[read] = 0;
 
-    var parser = Parser.init(cap_buf[0 .. read + 1 :0]);
+    var parser = Parser.init(cap_buf[0..read :0]);
 
+    // TODO: Handle case of bad or no
     try parser.expect(.asterisk);
-    try parser.expectIdentifier("CAPABILITY");
-    const CAP_UNTAGGED = "* CAPABILITY ";
-    if (!std.mem.startsWith(u8, cap_buf[0..CAP_UNTAGGED.len], CAP_UNTAGGED)) {
-        log.err("Unexpected response from IMAP server: {s}", .{cap_buf[0..read]});
-        return error.UnexpectedResponse;
-    }
-    const cap_end = std.mem.indexOfScalar(u8, cap_buf[CAP_UNTAGGED.len..read], '\r') orelse return error.UnexpectedResponse;
-
-    log.info("Parsing capabilities: {s}", .{cap_buf[CAP_UNTAGGED.len..cap_end]});
+    try parser.expect(.keyword_capability);
 
     self.capabilities.deinit(alloc);
-    self.capabilities = try Capabilities.parseCapabilities(alloc, cap_buf[CAP_UNTAGGED.len..cap_end]);
 
-    if (!std.mem.eql(u8, cap_buf[cap_end + 2 .. cap_end + 6], &tag_buf)) {
-        log.err("Unexpected response from IMAP server: {s}", .{cap_buf[cap_end + 2 .. read]});
-        return error.UnexpectedResponse;
-    }
+    try self.capabilities.parse(alloc, &parser);
 
-    self.state = .authenticated;
+    try parser.expectIdentifier(tag);
+    try parser.expect(.keyword_ok);
+
     self.tag_id += 1;
     return self.capabilities;
 }
@@ -262,9 +253,12 @@ pub fn authenticatePlain(self: *Session, alloc: std.mem.Allocator, username: []c
         log.err("Failed to read from IMAP server after auth command: {}", .{err});
         return err;
     };
-    if (std.mem.eql(u8, auth_buf[0..read], "+\r\n")) {
-        log.err("IMAP server does not support PLAIN authentication", .{});
-        return error.UnexpectedResponse;
+    {
+        auth_buf[read] = 0;
+        var auth_parse = Parser.init(auth_buf[0..read :0]);
+        // TODO: Handle case of bad or no
+        try auth_parse.expect(.plus);
+        try auth_parse.expect(.crlf);
     }
 
     var stream = std.io.fixedBufferStream(&auth_buf);
@@ -285,21 +279,36 @@ pub fn authenticatePlain(self: *Session, alloc: std.mem.Allocator, username: []c
         log.err("Failed to read from IMAP server after auth string: {}", .{err});
         return err;
     };
-    var parser = ResponseParser{
-        .tag = tag,
-        .buffer = auth_buf[0..read],
-    };
 
-    const cap = parser.next() orelse return error.UnexpectedResponse;
+    auth_buf[read] = 0;
+    var parser = Parser.init(auth_buf[0..read :0]);
 
-    self.capabilities.deinit(alloc);
-    self.capabilities = try Capabilities.parseCapabilities(alloc, cap.untagged.value);
-
-    const end = parser.next() orelse return error.UnexpectedResponse;
-    if (end.tagged.kind != .ok) {
-        log.err("Authentication failed: {s}", .{end.tagged.value});
-        return error.AuthenticationFailed;
+    if (parser.peek()) |tok| {
+        switch (tok.tag) {
+            .asterisk => {
+                parser.expect(.asterisk) catch unreachable;
+                try parser.expect(.keyword_capability);
+                self.capabilities.deinit(alloc);
+                self.capabilities.parse(alloc, &parser) catch |err| {
+                    log.err("Failed to parse capabilities from AUTHENTICATE response: {s}", .{auth_buf[0..read]});
+                    return err;
+                };
+            },
+            .keyword_bad, .keyword_no => {
+                log.err("AUTHENTICATE command failed: {s}", .{auth_buf[0..read]});
+                return error.AuthenticateFailed;
+            },
+            .identifier => {
+                // This is likely the tagged response
+            },
+            else => {
+                log.err("Unexpected response from IMAP server: {s}", .{auth_buf[0..read]});
+                return error.UnexpectedResponse;
+            },
+        }
     }
+    try parser.expectIdentifier(tag);
+    try parser.expect(.keyword_ok);
 
     self.state = .authenticated;
     self.tag_id = 1;

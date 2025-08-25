@@ -1,6 +1,7 @@
 const std = @import("std");
 const Config = @This();
 const known_folders = @import("known-folders");
+const log = std.log.scoped(.config);
 
 username: []const u8,
 password: []const u8,
@@ -26,6 +27,7 @@ pub fn load(allocator: std.mem.Allocator) !Config {
             else => return err,
         };
         const bytes = try alloc.alloc(u8, local_config.username.len + local_config.password.len + local_config.hostname.len);
+        log.info("CONFIG: ALLOCATED {d} BYTES {d}", .{ bytes.len, @intFromPtr(bytes.ptr) });
         @memcpy(bytes[0..local_config.username.len], local_config.username);
         @memcpy(bytes[local_config.username.len .. local_config.username.len + local_config.password.len], local_config.password);
         @memcpy(bytes[local_config.username.len + local_config.password.len ..], local_config.hostname);
@@ -41,5 +43,6 @@ pub fn load(allocator: std.mem.Allocator) !Config {
 
 pub fn deinit(self: Config, allocator: std.mem.Allocator) void {
     const bytes = self.username.ptr[0 .. self.username.len + self.password.len + self.hostname.len];
+    log.info("CONFIG: FREEING {d} BYTES {d}", .{ bytes.len, @intFromPtr(bytes.ptr) });
     allocator.free(bytes);
 }

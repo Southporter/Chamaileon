@@ -14,7 +14,7 @@ pub fn init(input: [:0]const u8) Parser {
     var tokenizer = Tokenizer.init(input);
     const first_token = tokenizer.next();
     return .{
-        .tokenizer = Tokenizer.init(input),
+        .tokenizer = tokenizer,
         .curr = first_token,
     };
 }
@@ -41,6 +41,7 @@ pub fn expect(self: *Parser, expected: Token.Tag) !void {
 }
 
 pub fn expectIdentifier(self: *Parser, identifier: []const u8) !void {
+    defer self.next();
     if (self.curr) |token| {
         if (token.tag != .identifier) {
             return error.UnexpectedToken;
@@ -51,4 +52,23 @@ pub fn expectIdentifier(self: *Parser, identifier: []const u8) !void {
     } else {
         return error.EndOfInput;
     }
+}
+
+pub fn not(self: *Parser, unexpected: Token.Tag) bool {
+    if (self.curr) |token| {
+        return token.tag != unexpected;
+    }
+    return false;
+}
+
+pub fn get(self: *Parser, expected: Token.Tag) ![]const u8 {
+    if (self.curr) |token| {
+        if (token.tag != expected) {
+            return error.UnexpectedToken;
+        }
+        const slice = self.tokenizer.buffer[token.start..token.end];
+        self.next();
+        return slice;
+    }
+    return error.EndOfInput;
 }
