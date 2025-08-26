@@ -40,6 +40,11 @@ pub const Token = struct {
         .{ "PERMANENTFLAGS", .keyword_permanentflags },
         .{ "READ-WRITE", .keyword_read_write },
         .{ "READ-ONLY", .keyword_read_only },
+        .{ "BODY", .keyword_body},
+        .{ "HEADER", .keyword_header },
+        .{ "FIELDS", .keyword_fields},
+        .{ "SUBJECT", .keyword_subject},
+        .{ "FROM", .keyword_subject},
     });
 
     pub fn getKeyword(bytes: []const u8) ?Tag {
@@ -56,6 +61,7 @@ pub const Token = struct {
         asterisk,
         period,
         plus,
+        dot,
         eql,
         l_brace,
         r_brace,
@@ -99,6 +105,12 @@ pub const Token = struct {
         keyword_permanentflags,
         keyword_read_write,
         keyword_read_only,
+
+        keyword_body,
+        keyword_header,
+        keyword_fields,
+        keyword_subject,
+        keyword_from,
 
         eof,
     };

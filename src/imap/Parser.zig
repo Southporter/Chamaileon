@@ -19,17 +19,33 @@ pub fn init(input: [:0]const u8) Parser {
     };
 }
 
-fn next(self: *Parser) void {
+pub fn hasEnoughBuffer(self: *Parser, size: usize) bool {
+    return (self.tokenizer.buffer.len - self.tokenizer.offset)>= size;
+}
+
+fn advance(self: *Parser) void {
     self.prev = self.curr;
     self.curr = self.tokenizer.next();
+}
+
+pub fn next(self: *Parser) ?Token {
+    self.advance();
+    return self.curr;
 }
 
 pub fn peek(self: *Parser) ?Token {
     return self.curr;
 }
 
+pub fn peekExpect(self: *Parser, expected: Token.Tag) bool {
+    if (self.curr) |token| {
+        return token.tag == expected;
+    }
+    return false;
+}
+
 pub fn expect(self: *Parser, expected: Token.Tag) !void {
-    defer self.next();
+    defer self.advance();
 
     if (self.curr) |token| {
         if (token.tag != expected) {
@@ -41,7 +57,7 @@ pub fn expect(self: *Parser, expected: Token.Tag) !void {
 }
 
 pub fn expectIdentifier(self: *Parser, identifier: []const u8) !void {
-    defer self.next();
+    defer self.advance();
     if (self.curr) |token| {
         if (token.tag != .identifier) {
             return error.UnexpectedToken;
@@ -67,8 +83,12 @@ pub fn get(self: *Parser, expected: Token.Tag) ![]const u8 {
             return error.UnexpectedToken;
         }
         const slice = self.tokenizer.buffer[token.start..token.end];
-        self.next();
+        self.advance();
         return slice;
     }
     return error.EndOfInput;
+}
+
+pub fn value(self: *Parser, tok: Token) []const u8 {
+    return self.tokenizer.buffer[tok.start..tok.end];
 }

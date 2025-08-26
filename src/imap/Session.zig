@@ -547,6 +547,34 @@ pub const MailboxDetails = struct {
         junk,
         junk_recorded,
         custom_flags,
+
+        fn parse(value: []const u8) ?Flag {
+            if (std.mem.eql(u8, stripped, "Answered")) {
+                return .answered;
+            } else if (std.mem.eql(u8, stripped, "Flagged")) {
+                return .flagged;
+            } else if (std.mem.eql(u8, stripped, "Draft")) {
+                return .draft;
+            } else if (std.mem.eql(u8, stripped, "Deleted")) {
+                return .deleted;
+            } else if (std.mem.eql(u8, stripped, "Seen")) {
+                return .seen;
+            } else if (std.mem.eql(u8, stripped, "NotJunk")) {
+                return .not_junk;
+            } else if (std.mem.eql(u8, stripped, "NotPhishing")) {
+                return .not_phishing;
+            } else if (std.mem.eql(u8, stripped, "Phishing")) {
+                return .phishing;
+            } else if (std.mem.eql(u8, stripped, "Forwarded")) {
+                return .forwarded;
+            } else if (std.mem.eql(u8, stripped, "Junk")) {
+                return .junk;
+            } else if (std.mem.eql(u8, stripped, "JunkRecorded")) {
+                return .junk_recorded;
+            }
+            log.warn("Unknown mailbox flag: {s}", .{flag});
+            return null;
+        }
     };
 
     pub fn format(value: *const MailboxDetails, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
@@ -648,7 +676,7 @@ pub const MailboxDetails = struct {
 
 pub fn select(self: *Session, mailbox: Box) !MailboxDetails {
     log.debug("Selecting in state: {s}", .{@tagName(self.state)});
-    if (self.state != .authenticated) {
+    if (self.state != .selected and self.state != .authenticated) {
         return error.InvalidState;
     }
     var tag_buf: [4]u8 = undefined;
@@ -816,6 +844,17 @@ pub const PreviewResult = struct {
     }
 };
 
+const PreviewReadState = enum {
+    read_buf,
+    tagged_or_untagged,
+    tagged,
+    id,
+    fetch,
+    flags,
+    flag,
+    body,
+};
+
 pub fn preview(self: *Session, alloc: std.mem.Allocator, range: Range) !PreviewResult {
     var tag_buf: [4]u8 = undefined;
     const tag = std.fmt.bufPrint(&tag_buf, "S{d:0>3}", .{self.tag_id}) catch unreachable;
@@ -823,89 +862,104 @@ pub fn preview(self: *Session, alloc: std.mem.Allocator, range: Range) !PreviewR
     var fetch_buf: [1024]u8 = undefined;
     try self.tls.writeAll(self.socket, std.fmt.bufPrint(&fetch_buf, "{s} FETCH {d}:{d} (FLAGS BODY.PEEK[HEADER.FIELDS (Subject From Date)])\r\n", .{ tag, range.min, range.max }) catch unreachable);
 
-    var read_more = true;
-    var parser = ResponseParser{
-        .tag = tag,
-        .buffer = &fetch_buf,
+    var parser: Parser = undefined;
+    var state_after_read: PreviewReadState = .tagged_or_untagged;
+    var preview: PreviewResult.Preview = .{
     };
-
-    var peek_result = PreviewResult{};
-    while (read_more) {
-        const read = self.tls.read(self.socket, fetch_buf[parser.offset..]) catch |err| {
-            log.err("Failed to read from IMAP server after SELECT command: {}", .{err});
-            return err;
-        };
-        parser.buffer = fetch_buf[parser.offset .. read + parser.offset];
-
-        while (parser.next()) |line| {
-            switch (line) {
-                .untagged => |res| {
-                    var mail = try peek_result.mail.addOne(alloc);
-                    mail.uid = try std.fmt.parseInt(u32, res.kind, 10);
-                    log.debug("Untagged response: {s} {s}", .{ res.kind, res.value });
-                    // * 2 FETCH (FLAGS (NonJunk \Seen) BODY[HEADER.FIELDS (From Subject Date)] {196}
-                    // Date: Tue, 27 May 2025 19:47:50 +0000
-                    // Subject: Document shared with you: "Estimation Model Approaches for Solutions"
-                    // From: "Ryan Gross (via Google Docs)" <drive-shares-dm-noreply@google.com>
-                    //
-                    // )
-                    var stream = std.io.fixedBufferStream(res.value);
-                    var reader = stream.reader();
-                    reader.skipUntilDelimiterOrEof("\n") catch |err| {
-                        log.err("Failed to read from IMAP server after FETCH command: {}", .{err});
-                        return err;
-                    };
-                    while (res.value[reader.context.pos] != '\r' and res.value[reader.context.pos + 1] != '\n') {
-                        var header_buf: [16]u8 = undefined;
-                        const header = try reader.readUntilDelimiterOrEof(&header_buf, ':');
-                        if (header) |h| {
-                            try reader.skipBytes(2); // Skip ': '
-                            if (std.mem.eql(u8, h, "Subject")) {
-                                mail.subject = try alloc.dupe(u8, res.value[reader.context.pos + 1 ..]);
-                            } else if (std.mem.eql(u8, h, "From")) {
-                                mail.from = try alloc.dupe(u8, res.value[reader.context.pos + 1 ..]);
-                            } else if (std.mem.eql(u8, h, "Date")) {
-                                mail.date = try zeit.instant(.{ .source = .{ .rfc2822 = res.value[reader.context.pos + 1 ..] } });
-                            } else {
-                                log.warn("Unknown header in FETCH response: {s}", .{h});
-                                return error.UnexpectedResponse;
-                            }
-                        } else {
-                            log.err("Failed to read header from FETCH response: {s}", .{res.value});
-                            return error.UnexpectedResponse;
-                        }
-                    }
-                },
-                .tagged => |res| {
-                    switch (res.kind) {
-                        .ok => {
-                            log.info("FETCH command completed successfully: {s}", .{res.value});
-                            self.tag_id += 1;
-                            return peek_result;
-                        },
-                        .no, .bad => {
-                            log.err("FETCH command failed: {s}", .{res.value});
-                            return error.FetchFailed;
-                        },
-                    }
-                },
+    var result = PreviewResult{};
+    parse: switch (PreviewReadState.read_buf) {
+        .read_buf => {
+            const read = self.tls.read(self.socket, &fetch_buf) catch |err| {
+                log.err("Failed to read from IMAP server after FETCH command: {}", .{err});
+                return err;
+            };
+            fetch_buf[read] = 0;
+            parser = Parser.init(fetch_buf[0..read :0]);
+            continue :parse state_after_read;
+        },
+        .tagged_or_untagged => {
+            if (parser.peekExpect(.asterisk)) {
+                parser.expect(.asterisk) catch unreachable;
+                continue :parse .id;
+            } else {
+                continue :parse .tagged;
             }
-        }
-
-        switch (parser.state) {
-            .err => {
-                log.err("Parser is in error state, cannot continue", .{});
-                read_more = false;
+        },
+        .tagged => {
+            try parser.expectIdentifier(tag);
+            try parser.expect(.keyword_ok);
+            self.tag_id += 1;
+            return result;
+        },
+        .id => {
+            preview.uid = parser.get(.number) catch |err| {
+                switch (err) {
+                    error.UnexpectedResponse => {
+                        log.err("Failed to parse UID from FETCH response: {s}", .{fetch_buf[0..parser.offset]});
+                        return err;
+                    },
+                    error.EndOfStream => {
+                        state_after_read = .id;
+                        continue :parse read_buf;
+                    },
+                    else => return err,
+                }
             },
-            .end => {
-                read_more = false;
-            },
-            else => {
-                std.mem.copyForwards(u8, fetch_buf[0..(read - parser.offset)], fetch_buf[parser.offset..read]);
-                parser.offset = 0;
-                log.debug("Continuing to read more data from IMAP server", .{});
-            },
+            continue :parse .fetch;
+        },
+        .fetch => {
+            try parser.expect(.keyword_fetch);
+            continue :parse .flags;
+        },
+        .flags => {
+            try parser.expect(.lparen);
+            try parser.expect(.keyword_flags);
+            try parser.expect(.lparen);
+            continue :parse .flag;
+        },
+        .flag => {
+            const next = parser.next() orelse {
+                state_after_read = .flag;
+                continue :parse read_buf;
+            };
+            if (next.tag == .rparen) {
+                continue :parse .body;
+            }
+            if (MailboxDetails.Flags.parse(parser.value(next))) |flag| {
+                preview.flags.insert(flag);
+            }
+            continue :parse .flag;
+        },
+        .body => {
+            try parser.expect(.keyword_body);
+            try parser.expect(.dot);
+            try parser.expect(.lbrack);
+continue :parse .header_fields;
+        },
+        .header_fields => {
+            try parser.expect(.keyword_header);
+            try parser.expect(.period);
+            try parser.expect(.keyword_fields);
+            try parser.expect(.lparen);
+            try parser.expect(.keyword_subject);
+            try parser.expect(.keyword_from);
+            try parser.expectIdentifier("Date");
+            try parser.expect(.rparen);
+            try parser.expect(.rbrack);
+        },
+        .message_length => {
+            try parser.expect(.lbrace);
+            const msg_len = try parser.get(.number);
+            try parser.expect(.rbrace);
+            try parser.expect(.crlf);
+            if (!parser.hasEnoughBuffer(msg_len)) {
+                state_after_read = .message_body;
+                continue :parse read_buf;
+            }
+            continue :parse .message_body;
+        },
+        .message_body => {
+            
         }
     }
-    return error.UnexpectedResponse; // If we reach here, something went wrong
 }
