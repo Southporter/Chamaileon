@@ -24,7 +24,7 @@ var scale_val: f32 = 1.0;
 var show_dialog_outside_frame: bool = false;
 
 pub fn main() !void {
-    std.log.info("SDL version: {}", .{Backend.getSDLVersion()});
+    std.log.info("SDL version: {f}", .{Backend.getSDLVersion()});
 
     defer if (gpa_instance.deinit() != .ok) @panic("Memory leak on exit!");
 
@@ -96,7 +96,7 @@ pub fn main() !void {
         try backend.renderPresent();
 
         // waitTime and beginWait combine to achieve variable framerates
-        const wait_event_micros = win.waitTime(end_micros, null);
+        const wait_event_micros = win.waitTime(end_micros);
         interrupted = try backend.waitEventTimeout(wait_event_micros);
 
         // Example of how to show a dialog from another thread (outside of win.begin/win.end)

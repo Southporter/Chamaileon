@@ -15,13 +15,15 @@ pub fn load(allocator: std.mem.Allocator) !Config {
     const home_dir = try known_folders.open(alloc, .home, .{ .access_sub_paths = true });
     if (home_dir) |home| {
         const config_data = try home.openFile(".config/mailbox/config.zon", .{ .mode = .read_only });
-        const config_bytes = try config_data.readToEndAllocOptions(alloc, 2048, 64, @alignOf([:0]u8), 0);
-        var status: std.zon.parse.Status = .{};
-        const local_config = std.zon.parse.fromSlice(Config, alloc, config_bytes, &status, .{
+        var read_buf: [256]u8 = undefined;
+        var reader = config_data.reader(&read_buf);
+        const config_bytes = try reader.interface.readAlloc(alloc, try config_data.getEndPos());
+        var status: std.zon.parse.Diagnostics = .{};
+        const local_config = std.zon.parse.fromSlice(Config, alloc, config_bytes[0.. :0], &status, .{
             .ignore_unknown_fields = true,
         }) catch |err| switch (err) {
             error.ParseZon => {
-                std.log.err("Failed to parse config: {}", .{status});
+                std.log.err("Failed to parse config: {f}", .{status});
                 return error.ParseError;
             },
             else => return err,

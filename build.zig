@@ -51,6 +51,14 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);
 
+    const check_exe = b.addExecutable(.{
+        .name = "mailbox",
+        .root_module = exe_mod,
+    });
+
+    const check_step = b.step("check", "Run the compiler's code checks");
+    check_step.dependOn(&check_exe.step);
+
     const lib_unit_tests = b.addTest(.{
         .root_module = lib_mod,
     });

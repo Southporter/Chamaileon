@@ -3,8 +3,7 @@ const log = std.log.scoped(.imap_response_parser);
 const ResponseParser = @This();
 
 tag: []const u8,
-buffer: []const u8,
-offset: usize = 0,
+reader: *std.Io.Reader,
 state: ParserState = .init,
 const ParserState = enum {
     init,
@@ -40,15 +39,11 @@ const Response = union(enum) {
 };
 
 pub fn next(self: *ResponseParser) ?Response {
-    if (self.offset >= self.buffer.len) {
-        return null; // No more data
-    }
-    log.debug("NEXT: ({s}) {s}", .{ self.buffer[self.offset .. self.offset + 1], @tagName(self.state) });
-
     parser: switch (self.state) {
         .init, .line_end => {
-            if (self.buffer[self.offset] == '*') {
-                self.offset += 1; // Skip the '*'
+            const star = self.reader.peekByte() catch return null;
+            if (star == '*') {
+                _ = self.reader.takeByte() catch unreachable; // Skip the '*'
                 self.state = .untagged;
                 continue :parser .untagged;
             } else {
@@ -57,38 +52,21 @@ pub fn next(self: *ResponseParser) ?Response {
             }
         },
         .untagged => {
-            if (self.offset >= self.buffer.len) {
-                return null; // No more data
-            }
-            var start = self.offset + 1;
-            log.debug("UNTAGGED: {c}", .{self.buffer[self.offset]});
-            const kind_end = std.mem.indexOfScalar(u8, self.buffer[start..], ' ') orelse return null;
-            const kind = self.buffer[start .. start + kind_end];
-            log.debug("KIND: {s}", .{kind});
-            start += kind_end + 1; // Skip the space
-            const value_start = start;
-
-            while (start + 1 <= self.buffer.len and self.buffer[start] != '\r' and self.buffer[start + 1] != '\n') {
-                start += 1;
-            }
-            if (start + 1 > self.buffer.len or self.buffer[start] != '\r' or self.buffer[start + 1] != '\n') {
-                return null; // Not enough data for value
-            }
-            const value = self.buffer[value_start..start];
-            log.debug("VALUE: {s}", .{value});
-            self.offset = start + 2; // Skip the \r\n
-            self.state = .line_end;
-            return Response{ .untagged = .{ .kind = kind, .value = value } };
-        },
-        .tag => {
-            var start = self.offset;
-            log.debug("TAG: {c}", .{self.buffer[self.offset]});
-            const tag_end = std.mem.indexOfScalar(u8, self.buffer[start..], ' ') orelse return null;
-            if (tag_end < 1 or tag_end > self.tag.len) {
-                self.state = .line_end;
+            const space = self.reader.takeByte() catch return null;
+            if (space != ' ') {
+                log.err("Expected space after '*', got: ({c})", .{space});
+                self.state = .err;
                 return null;
             }
-            const tag = self.buffer[start .. start + tag_end];
+            const kind = self.reader.takeDelimiterExclusive(' ') catch return null;
+            log.debug("KIND: {s}", .{kind});
+            const value = self.reader.takeDelimiterInclusive('\n') catch return null;
+            log.debug("VALUE: {s}", .{value});
+            self.state = .line_end;
+            return Response{ .untagged = .{ .kind = kind, .value = value[0 .. value.len - 2] } };
+        },
+        .tag => {
+            const tag = self.reader.takeDelimiterExclusive(' ') catch return null;
             std.debug.assert(tag.len == self.tag.len);
             log.debug("TAG: ({s}) == ({s})", .{ tag, self.tag });
             if (!std.mem.eql(u8, tag, self.tag)) {
@@ -96,116 +74,83 @@ pub fn next(self: *ResponseParser) ?Response {
                 self.state = .err;
                 return null;
             }
-            start += tag_end + 1;
-            self.offset = start;
             self.state = .response;
             continue :parser .response;
         },
         .response => {
-            log.debug("Next state: response ({c})", .{self.buffer[self.offset]});
-            switch (self.buffer[self.offset]) {
+            log.debug("Next state: response ({c})", .{self.reader.peekByte() catch return null});
+            switch (self.reader.peekByte() catch unreachable) {
                 'O' => continue :parser .response_o,
                 'N' => continue :parser .response_n,
                 'B' => continue :parser .response_b,
-                else => {
-                    log.err("Unexpected response from IMAP server: ({s})", .{self.buffer[self.offset..]});
+                else => |b| {
+                    log.err("Unexpected response from IMAP server: ({c})", .{b});
                     self.state = .err;
                     return null;
                 },
             }
         },
         .response_o => {
-            var start = self.offset;
-            if (start + 2 > self.buffer.len) {
-                return null; // Not enough data for "OK "
-            }
-            if (self.buffer[start + 1] == 'K') {
-                start += 2; // Skip "OK"
-                self.offset = start;
+            const ok = self.reader.take(2) catch return null;
+            if (ok[1] == 'K') {
                 self.state = .response_ok;
                 continue :parser .response_ok;
             } else {
-                log.err("Unexpected response from IMAP server: ({s})", .{self.buffer[start..]});
+                log.err("Unexpected response from IMAP server: ({s})", .{ok});
                 self.state = .err;
                 return null;
             }
         },
         .response_ok => {
-            var start = self.offset;
-            if (self.buffer[start] == ' ') {
-                start += 1; // Skip the space after "OK"
-            }
-            const value_start = start;
-            while (start + 1 <= self.buffer.len and self.buffer[start] != '\r' and self.buffer[start + 1] != '\n') {
-                start += 1;
-            }
-            const value = self.buffer[value_start..start];
+            var value = self.reader.takeDelimiterInclusive('\n') catch return null;
             log.debug("Response OK: {s}", .{value});
-            self.offset = start + 2; // Skip the \r\n
             self.state = .end;
-            return Response{ .tagged = .{ .kind = .ok, .value = value } };
+            if (value[0] == ' ') {
+                value = value[1..]; // Skip leading space
+            }
+            return Response{ .tagged = .{ .kind = .ok, .value = value[0 .. value.len - 2] } };
         },
         .response_n => {
-            var start = self.offset;
-            if (start + 2 > self.buffer.len) {
-                return null; // Not enough data for "NO "
-            }
-            if (self.buffer[start + 1] == 'O') {
-                start += 2; // Skip "NO"
-                self.offset = start;
+            const no = self.reader.take(2) catch return null;
+            if (no[1] == 'O') {
                 self.state = .response_no;
                 continue :parser .response_no;
             } else {
-                log.err("Unexpected response from IMAP server: ({s})", .{self.buffer[start..]});
+                log.err("Unexpected response from IMAP server: ({s})", .{no});
                 self.state = .err;
                 return null;
             }
         },
         .response_no => {
-            var start = self.offset;
-            if (self.buffer[start] == ' ') {
-                start += 1; // Skip the space after "OK"
+            var value = self.reader.takeDelimiterInclusive('\n') catch return null;
+            if (value[0] == ' ') {
+                value = value[1..]; // Skip leading space
             }
-            const value_start = start;
-            while (start + 1 <= self.buffer.len and self.buffer[start] != '\r' and self.buffer[start + 1] != '\n') {
-                start += 1;
-            }
-            const value = self.buffer[value_start..start];
             log.debug("Response NO: {s}", .{value});
-            self.offset = start + 2; // Skip the \r\n
             self.state = .end;
-            return Response{ .tagged = .{ .kind = .no, .value = value } };
+            return Response{ .tagged = .{ .kind = .no, .value = value[0 .. value.len - 2] } };
         },
 
         .response_b => {
-            if (self.offset + 2 >= self.buffer.len) {
-                return null; // Not enough data for "BAD "
-            }
-            if (self.buffer[self.offset + 1] == 'A' and self.buffer[self.offset + 2] == 'D') {
-                self.offset += 3;
+            const bad = self.reader.take(3) catch return null;
+            if (bad[1] == 'A' and bad[2] == 'D') {
                 self.state = .response_bad;
                 continue :parser .response_bad;
             } else {
-                log.err("Unexpected response from IMAP server: ({s})", .{self.buffer[self.offset..]});
+                log.err("Unexpected response from IMAP server: ({s})", .{bad});
                 self.state = .err;
                 return null;
             }
         },
 
         .response_bad => {
-            var start = self.offset;
-            if (self.buffer[start] == ' ') {
-                start += 1; // Skip the space after "BAD"
+            var value = self.reader.takeDelimiterInclusive('\n') catch return null;
+            if (value[0] == ' ') {
+                value = value[1..]; // Skip leading space
             }
-            const value_start = start;
-            while (start + 1 <= self.buffer.len and self.buffer[start] != '\r' and self.buffer[start + 1] != '\n') {
-                start += 1;
-            }
-            const value = self.buffer[value_start..start];
             log.debug("Response BAD: {s}", .{value});
-            self.offset = start + 2; // Skip the \r\n
             self.state = .end;
-            return Response{ .tagged = .{ .kind = .bad, .value = value } };
+            return Response{ .tagged = .{ .kind = .bad, .value = value[0 .. value.len - 2] } };
         },
         .end => {
             return null; // No more data
@@ -219,9 +164,10 @@ pub fn next(self: *ResponseParser) ?Response {
 }
 
 test "ResponseParser - full buffer" {
+    var fixed: std.Io.Reader = .fixed("* CAPABILITY IMAP4rev1\r\nA001 OK That's it\r\n");
     var parser = ResponseParser{
         .tag = "A001",
-        .buffer = "* CAPABILITY IMAP4rev1\r\nA001 OK That's it\r\n",
+        .reader = &fixed,
     };
     var res = parser.next() orelse return error.UnexpectedResponse;
     try std.testing.expectEqualStrings("CAPABILITY", res.untagged.kind);
@@ -235,9 +181,10 @@ test "ResponseParser - full buffer" {
     try std.testing.expectEqual(parser.state, .end);
 }
 test "ResponseParser - full buffer tag with empty value" {
+    var fixed: std.Io.Reader = .fixed("* CAPABILITY IMAP4rev1\r\nA001 OK\r\n");
     var parser = ResponseParser{
         .tag = "A001",
-        .buffer = "* CAPABILITY IMAP4rev1\r\nA001 OK\r\n",
+        .reader = &fixed,
     };
     var res = parser.next() orelse return error.UnexpectedResponse;
     try std.testing.expectEqualStrings("CAPABILITY", res.untagged.kind);
@@ -252,9 +199,10 @@ test "ResponseParser - full buffer tag with empty value" {
 }
 
 test "ResponseParser - partial buffer" {
+    var fixed: std.Io.Reader = .fixed("* CAPABILITY IMAP4rev1\r\nA001 O");
     var parser = ResponseParser{
         .tag = "A001",
-        .buffer = "* CAPABILITY IMAP4rev1\r\nA001 O",
+        .reader = &fixed,
     };
     const res = parser.next() orelse return error.UnexpectedResponse;
     try std.testing.expectEqualStrings("CAPABILITY", res.untagged.kind);
@@ -263,8 +211,7 @@ test "ResponseParser - partial buffer" {
     try std.testing.expectEqual(null, parser.next());
     try std.testing.expectEqual(parser.state, .response);
 
-    parser.offset = 0;
-    parser.buffer = "OK Value\r\n";
+    fixed = .fixed("OK Value\r\n");
     const res2 = parser.next() orelse return error.UnexpectedResponse;
     try std.testing.expectEqual(.ok, res2.tagged.kind);
     try std.testing.expectEqualStrings("Value", res2.tagged.value);
@@ -274,9 +221,10 @@ test "ResponseParser - partial buffer" {
 }
 
 test "ResponseParser - BAD tag" {
+    var fixed: std.Io.Reader = .fixed("A001 BAD Invalid command\r\n");
     var parser = ResponseParser{
         .tag = "A001",
-        .buffer = "A001 BAD Invalid command\r\n",
+        .reader = &fixed,
     };
 
     const res = parser.next() orelse return error.UnexpectedResponse;
@@ -287,9 +235,10 @@ test "ResponseParser - BAD tag" {
 }
 
 test "ResponseParser - NO tag" {
+    var fixed: std.Io.Reader = .fixed("A001 NO Not allowed\r\n");
     var parser = ResponseParser{
         .tag = "A001",
-        .buffer = "A001 NO Not allowed\r\n",
+        .reader = &fixed,
     };
 
     const res = parser.next() orelse return error.UnexpectedResponse;

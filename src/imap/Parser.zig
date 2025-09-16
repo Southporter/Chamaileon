@@ -10,7 +10,7 @@ tokenizer: Tokenizer,
 prev: ?Token = null,
 curr: ?Token = null,
 
-pub fn init(input: [:0]const u8) Parser {
+pub fn init(input: *std.Io.Reader) Parser {
     var tokenizer = Tokenizer.init(input);
     const first_token = tokenizer.next();
     return .{
@@ -20,7 +20,7 @@ pub fn init(input: [:0]const u8) Parser {
 }
 
 pub fn hasEnoughBuffer(self: *Parser, size: usize) bool {
-    return (self.tokenizer.buffer.len - self.tokenizer.offset)>= size;
+    return (self.tokenizer.buffer.len - self.tokenizer.offset) >= size;
 }
 
 fn advance(self: *Parser) void {
@@ -62,7 +62,7 @@ pub fn expectIdentifier(self: *Parser, identifier: []const u8) !void {
         if (token.tag != .identifier) {
             return error.UnexpectedToken;
         }
-        if (!std.mem.eql(u8, self.tokenizer.buffer[token.start..token.end], identifier)) {
+        if (!std.mem.eql(u8, self.tokenizer.scratch[token.start..token.end], identifier)) {
             return error.UnexpectedIdentifier;
         }
     } else {
@@ -82,7 +82,7 @@ pub fn get(self: *Parser, expected: Token.Tag) ![]const u8 {
         if (token.tag != expected) {
             return error.UnexpectedToken;
         }
-        const slice = self.tokenizer.buffer[token.start..token.end];
+        const slice = self.tokenizer.scratch[token.start..token.end];
         self.advance();
         return slice;
     }

@@ -77,14 +77,15 @@ pub fn worker(alloc: std.mem.Allocator, config: mailbox.Config, running: *bool, 
 
     log.info("Connecting to the server", .{});
 
-    var session = if (config.port == 993) mailbox.ImapSession.connectTls(alloc, .{
+    var session: mailbox.ImapSession = undefined;
+    if (config.port == 993) session.connectTls(alloc, .{
         .host = config.hostname,
         .port = config.port,
         .ca_bundle = ca_bundle,
     }) catch |err| {
         std.log.err("Failed to connect to IMAP server: {}", .{err});
         return;
-    } else mailbox.ImapSession.connect(alloc, .{ .host = config.hostname, .port = config.port, .ca_bundle = undefined }) catch |err| {
+    } else session.connect(alloc, .{ .host = config.hostname, .port = config.port, .ca_bundle = undefined }) catch |err| {
         std.log.err("Failed to connect to IMAP server: {}", .{err});
         return;
     };
