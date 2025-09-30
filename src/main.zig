@@ -63,6 +63,7 @@ pub fn main() !void {
     }
 
     var interrupted = false;
+    var page: ui.Page = .mailbox_select;
 
     main_loop: while (true) {
 
@@ -82,7 +83,7 @@ pub fn main() !void {
         _ = Backend.c.SDL_RenderClear(backend.renderer);
 
         // The demos we pass in here show up under "Platform-specific demos"
-        gui_frame(.mailbox_select);
+        page = gui_frame(page);
 
         // marks end of dvui frame, don't call dvui functions after this
         // - sends all dvui stuff to backend for rendering, must be called before renderPresent()
@@ -109,69 +110,22 @@ pub fn main() !void {
     running = false;
 }
 
-const Page = enum {
-    mailbox_select,
-};
-
 // both dvui and SDL drawing
-fn gui_frame(page: Page) void {
+fn gui_frame(page: ui.Page) ui.Page {
     ui.menu();
 
-    switch (page) {
+    const next_page = switch (page) {
         .mailbox_select => ui.mailbox_select(gpa, background.state) catch |err| {
             std.log.err("Failed to render mailbox select: {}", .{err});
+            return .err;
         },
-    }
+        .mailbox_list => ui.mailbox_list(gpa, background.state),
+        .err => ui.err(),
+    };
 
-    // var content = dvui.box(@src(), .horizontal, .{
-    //     .expand = .both,
-    // });
-    // defer content.deinit();
-    //
-    // {
-    //     var list_view = dvui.scrollArea(@src(), .{
-    //         .horizontal = .auto,
-    //     }, .{
-    //         .expand = .vertical,
-    //         .color_fill = .fill_window,
-    //     });
-    //     defer list_view.deinit();
-    //
-    //     var arena = std.heap.ArenaAllocator.init(gpa);
-    //     defer arena.deinit();
-    //
-    //     for (0..10) |i| {
-    //         var item = dvui.box(@src(), .horizontal, .{ .expand = .horizontal, .min_size_content = .{ .h = 30 }, .margin = .{ .x = 4 }, .id_extra = i });
-    //         defer item.deinit();
-    //
-    //         if (dvui.button(@src(), std.fmt.allocPrint(arena.allocator(), "Button {d}", .{i}) catch return, .{}, .{ .id_extra = i })) {
-    //             std.log.info("Button {d} clicked", .{i});
-    //         }
-    //
-    //         dvui.label(@src(), "Item {d}", .{i}, .{ .id_extra = i });
-    //     }
-    // }
-    //
-    // {
-    //     var content_view = dvui.scrollArea(@src(), .{}, .{ .expand = .both });
-    //     defer content_view.deinit();
-    //
-    //     var text = dvui.textLayout(@src(), .{}, .{});
-    //     defer text.deinit();
-    //
-    //     text.addText(
-    //         \\ This is a test
-    //         \\ with a lot of extra text
-    //         \\ to show how text layout works in dvui.
-    //         \\ It can handle multiple lines
-    //         \\ and will automatically wrap text
-    //         \\ to fit the available space.
-    //         \\
-    //     , .{});
-    // }
-    //
-    // look at demo() for examples of dvui widgets, shows in a floating window
     dvui.Examples.demo();
+
+    return next_page;
 }
 
 test {

@@ -1,4 +1,5 @@
 const std = @import("std");
+const log = std.log.scoped(.tokenize);
 
 pub const Token = struct {
     tag: Tag,
@@ -62,6 +63,7 @@ pub const Token = struct {
         period,
         plus,
         dot,
+        colon,
         eql,
         l_brace,
         r_brace,
@@ -170,7 +172,10 @@ pub const Tokenizer = struct {
                     result.end = 0;
                     return result;
                 },
-                else => return result,
+                else => {
+                    log.err("Tokenizer error: {t}", .{err});
+                    return result;
+                },
             }) {
                 0 => continue :state .invalid,
                 ' ', '\t' => {
@@ -206,6 +211,9 @@ pub const Tokenizer = struct {
                 },
                 '.' => {
                     result.tag = .period;
+                },
+                ':' => {
+                    result.tag = .colon;
                 },
                 '=' => {
                     result.tag = .eql;

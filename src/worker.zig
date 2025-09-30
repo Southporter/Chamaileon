@@ -60,10 +60,25 @@ pub const State = struct {
     boxes: std.MultiArrayList(mailbox.ImapSession.Box) = .empty,
     data: Data = .{},
     details: ?mailbox.ImapSession.MailboxDetails = null,
+    preview: ?mailbox.ImapSession.PreviewResult = null,
 
     const Data = struct {
         details: []const u8 = "",
     };
+
+    pub fn deinit(self: *State, alloc: std.mem.Allocator) void {
+        self.lock.lock();
+        defer self.lock.unlock();
+        self.boxes.deinit(alloc);
+        if (self.preview) |p| {
+            p.deinit(alloc);
+            self.preview = null;
+        }
+        if (self.details) |d| {
+            d.deinit(alloc);
+            self.details = null;
+        }
+    }
 };
 
 pub fn worker(alloc: std.mem.Allocator, config: mailbox.Config, running: *bool, win: *dvui.Window) void {
@@ -159,12 +174,18 @@ pub fn worker(alloc: std.mem.Allocator, config: mailbox.Config, running: *bool, 
                     state.details = details;
 
                     log.info("Fetching mailbox details for '{f}'", .{details});
-                    // const preview = session.preview(alloc, .{ .min = 1, .max = details.exists }) catch |err| {
-                    //     log.err("Failed to fetch mailbox details: {}", .{err});
-                    //     continue;
-                    // };
+                    const preview = session.preview(alloc, .{ .min = 1, .max = details.exists }) catch |err| {
+                        log.err("Failed to fetch mailbox details: {}", .{err});
+                        continue;
+                    };
+                    {
+                        state.lock.lock();
+                        defer state.lock.unlock();
+                        state.preview = preview;
+                    }
+                    dvui.refresh(win, @src(), @enumFromInt(13131313));
 
-                    // log.info("Fetched mailbox details for '{f}'", .{preview});
+                    log.info("Fetched mailbox details for '{f}'", .{preview});
                 },
             }
         } else {

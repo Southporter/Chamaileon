@@ -8,12 +8,12 @@
 
     .dependencies = .{
         .dvui = .{
-            .url = "git+https://github.com/david-vanderson/dvui#05d585e021b30455dd1f3aa236946f88981eb59f",
-            .hash = "dvui-0.4.0-dev-AQFJmWOj0wAaB-katdDqJnwaeo57YZW8iYPFKGOjTg5G",
+            .url = "git+https://github.com/david-vanderson/dvui#764159277d7f8477b378737cf6bbed2db2d682d6",
+            .hash = "dvui-0.4.0-dev-AQFJmYPy0wBBSvkv148fIhT3c7lc_45KCaRqW-PIqBLT",
         },
         .known_folders = .{
-            .url = "git+https://github.com/ziglibs/known-folders.git#92defaee76b07487769ca352fd0ba95bc8b42a2f",
-            .hash = "known_folders-0.0.0-Fy-PJkfRAAAVdptXWXBspIIC7EkVgLgWozU5zIk5Zgcy",
+            .url = "git+https://github.com/ziglibs/known-folders.git#ab5cf5feb936fa3b72c95d3ad0c0c67791937ba1",
+            .hash = "known_folders-0.0.0-Fy-PJtTTAADUOhGKM0sxzG4eMkNQxRvx9e5dfHVyaeA3",
         },
         .zeit = .{
             .url = "git+https://github.com/rockorager/zeit.git#ade14edb2025f5e4a57b683f81c915f70a904e88",

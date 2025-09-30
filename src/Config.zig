@@ -14,12 +14,10 @@ pub fn load(allocator: std.mem.Allocator) !Config {
     const alloc = arena.allocator();
     const home_dir = try known_folders.open(alloc, .home, .{ .access_sub_paths = true });
     if (home_dir) |home| {
-        const config_data = try home.openFile(".config/mailbox/config.zon", .{ .mode = .read_only });
-        var read_buf: [256]u8 = undefined;
-        var reader = config_data.reader(&read_buf);
-        const config_bytes = try reader.interface.readAlloc(alloc, try config_data.getEndPos());
+        const config_bytes = try home.readFileAllocOptions(alloc, ".config/mailbox/config.zon", std.math.maxInt(u32), null, .of(u8), 0);
+
         var status: std.zon.parse.Diagnostics = .{};
-        const local_config = std.zon.parse.fromSlice(Config, alloc, config_bytes[0.. :0], &status, .{
+        const local_config = std.zon.parse.fromSlice(Config, alloc, config_bytes, &status, .{
             .ignore_unknown_fields = true,
         }) catch |err| switch (err) {
             error.ParseZon => {
@@ -28,7 +26,7 @@ pub fn load(allocator: std.mem.Allocator) !Config {
             },
             else => return err,
         };
-        const bytes = try alloc.alloc(u8, local_config.username.len + local_config.password.len + local_config.hostname.len);
+        const bytes = try allocator.alloc(u8, local_config.username.len + local_config.password.len + local_config.hostname.len);
         log.info("CONFIG: ALLOCATED {d} BYTES {d}", .{ bytes.len, @intFromPtr(bytes.ptr) });
         @memcpy(bytes[0..local_config.username.len], local_config.username);
         @memcpy(bytes[local_config.username.len .. local_config.username.len + local_config.password.len], local_config.password);

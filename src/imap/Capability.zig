@@ -9,6 +9,20 @@ pub const Capability = enum(u16) {
     auth_login,
     auth_xoauth2,
     starttls,
+
+    idle,
+    unselect,
+    namespace,
+    quota,
+    id,
+    children,
+    uidplus,
+    enable,
+    move,
+    condstore,
+    esearch,
+    compress_deflate,
+    utf8_accept,
     _,
 };
 
@@ -22,13 +36,17 @@ pub fn empty() Capabilities {
     return Capabilities{
         .tags = .initEmpty(),
         .interned = .empty,
-        .extra = [_]usize{0} ** 16,
+        .extra = @splat(0),
     };
 }
 
 pub fn deinit(self: *Capabilities, alloc: std.mem.Allocator) void {
-    self.interned.deinit(alloc);
+    if (self.interned.items.len > 0) {
+        self.interned.deinit(alloc);
+    }
     self.interned = .empty;
+    self.tags = .initEmpty();
+    self.extra = @splat(0);
 }
 
 pub fn parse(self: *Capabilities, alloc: std.mem.Allocator, parser: *Parser) !void {
@@ -52,13 +70,58 @@ pub fn parse(self: *Capabilities, alloc: std.mem.Allocator, parser: *Parser) !vo
             } else if (std.mem.eql(u8, kind, "XOAUTH2")) {
                 self.tags.insert(.auth_xoauth2);
             } else {
-                return error.UnknownAuthMechanism;
+                log.warn("Unknown AUTH mechanism: {s}", .{kind});
             }
         } else if (std.mem.eql(u8, name, "LOGIN")) {
             self.tags.insert(.login);
         } else if (std.mem.eql(u8, name, "LOGINDISABLED")) {
             self.tags.insert(.login_disabled);
+        } else if (std.mem.eql(u8, name, "UNSELECT")) {
+            self.tags.insert(.unselect);
+        } else if (std.mem.eql(u8, name, "IDLE")) {
+            self.tags.insert(.idle);
+        } else if (std.mem.eql(u8, name, "NAMESPACE")) {
+            self.tags.insert(.namespace);
+        } else if (std.mem.eql(u8, name, "QUOTA")) {
+            self.tags.insert(.quota);
+        } else if (std.mem.eql(u8, name, "ID")) {
+            self.tags.insert(.id);
+        } else if (std.mem.eql(u8, name, "CHILDREN")) {
+            self.tags.insert(.children);
+        } else if (std.mem.eql(u8, name, "UIDPLUS")) {
+            self.tags.insert(.uidplus);
+        } else if (std.mem.eql(u8, name, "ENABLE")) {
+            self.tags.insert(.enable);
+        } else if (std.mem.eql(u8, name, "MOVE")) {
+            self.tags.insert(.move);
+        } else if (std.mem.eql(u8, name, "CONDSTORE")) {
+            self.tags.insert(.condstore);
+        } else if (std.mem.eql(u8, name, "ESEARCH")) {
+            self.tags.insert(.esearch);
+        } else if (std.mem.eql(u8, name, "COMPRESS")) {
+            try parser.expect(.eql);
+            const kind = try parser.get(.identifier);
+            if (std.mem.eql(u8, kind, "DEFLATE")) {
+                self.tags.insert(.compress_deflate);
+            } else {
+                log.warn("Unknown COMPRESS mechanism: {s}", .{kind});
+            }
+        } else if (std.mem.eql(u8, name, "UTF8")) {
+            try parser.expect(.eql);
+            const kind = try parser.get(.identifier);
+            if (std.mem.eql(u8, kind, "ACCEPT")) {
+                self.tags.insert(.utf8_accept);
+            } else {
+                log.warn("Unknown UTF8 capability: {s}", .{kind});
+            }
         } else {
+            if (parser.peek()) |token| {
+                if (token.tag == .eql) {
+                    // Skip parameters for unknown capabilities
+                    parser.expect(.eql) catch {};
+                    _ = try parser.expectAny(.identifier, .int);
+                }
+            }
             var i: u32 = 0;
             while (self.tags.contains(@enumFromInt(i))) : (i += 1) {}
             if (i >= self.extra.len) {
