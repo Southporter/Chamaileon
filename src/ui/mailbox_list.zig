@@ -8,7 +8,7 @@ pub fn render(alloc: std.mem.Allocator, state: background.State) Page {
 
     if (state.preview) |preview| {
         var content = dvui.box(@src(), .{
-            .dir = .horizontal,
+            .dir = .vertical,
         }, .{
             .expand = .both,
         });
@@ -35,10 +35,15 @@ pub fn render(alloc: std.mem.Allocator, state: background.State) Page {
         }
         return .mailbox_list;
     } else {
+        var container = dvui.flexbox(@src(), .{
+            .justify_content = .center,
+        }, .{ .expand = .both });
+        defer container.deinit();
+        dvui.spinner(@src(), .{});
         var text = dvui.textLayout(@src(), .{}, .{});
         defer text.deinit();
 
-        text.addText("No preview available", .{});
+        text.addText("Loading Mail", .{});
         return .mailbox_list;
     }
 }

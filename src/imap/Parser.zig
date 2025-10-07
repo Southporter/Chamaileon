@@ -30,7 +30,7 @@ fn advance(self: *Parser) void {
 }
 
 pub fn next(self: *Parser) ?Token {
-    self.advance();
+    defer self.advance();
     return self.curr;
 }
 

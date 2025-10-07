@@ -129,6 +129,7 @@ pub fn logout(self: *Session) void {
 }
 
 pub fn noop(self: *Session) !void {
+    @breakpoint();
     if (self.state == .disconnected) {
         return error.InvalidState;
     }
@@ -137,6 +138,7 @@ pub fn noop(self: *Session) !void {
 
     var w = self.writer();
     try w.print("{s} NOOP\r\n", .{tag});
+    try self.flush();
 
     var r = self.reader();
 
@@ -559,6 +561,8 @@ pub const MailboxDetails = struct {
                 return .seen;
             } else if (std.mem.eql(u8, value, "NotJunk")) {
                 return .not_junk;
+            } else if (std.mem.eql(u8, value, "NonJunk")) {
+                return .not_junk;
             } else if (std.mem.eql(u8, value, "NotPhishing")) {
                 return .not_phishing;
             } else if (std.mem.eql(u8, value, "Phishing")) {
@@ -652,6 +656,8 @@ pub const MailboxDetails = struct {
             } else if (std.mem.eql(u8, stripped, "Seen")) {
                 result.insert(.seen);
             } else if (std.mem.eql(u8, stripped, "NotJunk")) {
+                result.insert(.not_junk);
+            } else if (std.mem.eql(u8, stripped, "NonJunk")) {
                 result.insert(.not_junk);
             } else if (std.mem.eql(u8, stripped, "NotPhishing")) {
                 result.insert(.not_phishing);
@@ -844,7 +850,7 @@ pub fn preview(self: *Session, alloc: std.mem.Allocator, range: Range) !PreviewR
     var view: PreviewResult.Preview = .{};
     var result = PreviewResult{};
     errdefer result.deinit(alloc);
-    try result.mail.ensureTotalCapacityPrecise(alloc, range.max - range.min);
+    try result.mail.ensureTotalCapacityPrecise(alloc, range.max - range.min + 1);
     parse: switch (PreviewReadState.tagged_or_untagged) {
         .tagged_or_untagged => {
             if (parser.peekExpect(.asterisk)) {
@@ -858,6 +864,7 @@ pub fn preview(self: *Session, alloc: std.mem.Allocator, range: Range) !PreviewR
             try parser.expectIdentifier(tag);
             try parser.expect(.keyword_ok);
             self.tag_id += 1;
+            _ = try r.takeDelimiterInclusive('\n');
             return result;
         },
         .id => {
@@ -877,27 +884,23 @@ pub fn preview(self: *Session, alloc: std.mem.Allocator, range: Range) !PreviewR
             continue :parse .flag;
         },
         .flag => {
-            const next = parser.next();
+            const next = parser.peek();
             if (next) |tok| {
                 if (tok.tag == .r_paren) {
-                    try parser.expect(.r_paren);
+                    parser.expect(.r_paren) catch unreachable;
                     continue :parse .body;
                 }
                 if (MailboxDetails.Flags.parse(parser.value())) |flag| {
                     view.flags.insert(flag);
                 }
-                return error.UnexpectedResponse;
+                _ = parser.next();
+                continue :parse .flag;
             } else {
                 return error.UnexpectedResponse;
             }
-            if (next.tag == .r_paren) {
-                continue :parse .body;
-            }
-            continue :parse .flag;
         },
         .body => {
             try parser.expect(.keyword_body);
-            try parser.expect(.dot);
             try parser.expect(.l_bracket);
             try parser.expect(.keyword_header);
             try parser.expect(.period);
@@ -905,7 +908,7 @@ pub fn preview(self: *Session, alloc: std.mem.Allocator, range: Range) !PreviewR
             try parser.expect(.l_paren);
             try parser.expect(.keyword_subject);
             try parser.expect(.keyword_from);
-            try parser.expectIdentifier("Date");
+            try parser.expect(.keyword_date);
             try parser.expect(.r_paren);
             try parser.expect(.r_bracket);
             try parser.expect(.l_brace);
@@ -925,19 +928,23 @@ pub fn preview(self: *Session, alloc: std.mem.Allocator, range: Range) !PreviewR
             }
         },
         .message_header => {
-            const header = try parser.get(.identifier);
-            try parser.expect(.colon);
-            const value = try r.takeDelimiterInclusive('\n');
-            if (std.mem.eql(u8, header, "Subject")) {
-                const owned = try alloc.dupe(u8, value[0 .. value.len - 2]); // Strip CRLF
-                view.subject = owned;
-            } else if (std.mem.eql(u8, header, "From")) {
-                const owned = try alloc.dupe(u8, value[0 .. value.len - 2]); // Strip CRLF
-                view.from = owned;
-            } else if (std.mem.eql(u8, header, "Date")) {
+            const header = parser.next() orelse return error.UnexpectedResponse;
+            if (!parser.peekExpect(.colon)) return error.InvalidMessageHeader;
+            var value: std.ArrayList(u8) = .empty;
+            while (try r.peekByte() == ' ') {
+                _ = try r.take(1); // consume the space
+                var line = try r.takeDelimiterInclusive('\n');
+                try value.appendSlice(alloc, line[0 .. line.len - 2]); // Strip CRLF
+            }
+            _ = parser.next() orelse return error.UnexpectedResponse; // prime the next token
+            if (header.tag == .keyword_subject) {
+                view.subject = try value.toOwnedSlice(alloc);
+            } else if (header.tag == .keyword_from) {
+                view.from = try value.toOwnedSlice(alloc);
+            } else if (header.tag == .keyword_date) {
                 view.date = try zeit.instant(.{
                     .source = .{
-                        .rfc2822 = value[0 .. value.len - 2], // Strip CRLF
+                        .rfc2822 = value.items, // Strip CRLF
                     },
                 });
             }
@@ -945,6 +952,8 @@ pub fn preview(self: *Session, alloc: std.mem.Allocator, range: Range) !PreviewR
         },
         .message_end => {
             parser.expect(.crlf) catch unreachable;
+            try parser.expect(.r_paren);
+            try parser.expect(.crlf);
             result.mail.appendAssumeCapacity(view);
             continue :parse .tagged_or_untagged;
         },

@@ -67,6 +67,7 @@ pub const State = struct {
     };
 
     pub fn deinit(self: *State, alloc: std.mem.Allocator) void {
+        @breakpoint();
         self.lock.lock();
         defer self.lock.unlock();
         self.boxes.deinit(alloc);
@@ -155,7 +156,7 @@ pub fn worker(alloc: std.mem.Allocator, config: mailbox.Config, running: *bool, 
 
     while (running.*) {
         const start = std.time.milliTimestamp();
-        if (queue.pop(std.time.ns_per_min * 30)) |msg| {
+        if (queue.pop(std.time.ns_per_min * 1)) |msg| {
             const elapsed = std.time.milliTimestamp() - start;
             log.info("Message received after {d} ms: {any}", .{ elapsed, msg });
             switch (msg) {
@@ -169,9 +170,11 @@ pub fn worker(alloc: std.mem.Allocator, config: mailbox.Config, running: *bool, 
                         continue;
                     };
                     log.info("Mailbox '{s}' selected successfully", .{msg.select.name});
-                    state.lock.lock();
-                    defer state.lock.unlock();
-                    state.details = details;
+                    {
+                        state.lock.lock();
+                        defer state.lock.unlock();
+                        state.details = details;
+                    }
 
                     log.info("Fetching mailbox details for '{f}'", .{details});
                     const preview = session.preview(alloc, .{ .min = 1, .max = details.exists }) catch |err| {
