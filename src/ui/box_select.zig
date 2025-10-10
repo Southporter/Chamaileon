@@ -12,6 +12,8 @@ pub fn render(alloc: std.mem.Allocator, state: background.State) !Page {
         .padding = .{
             .x = 8,
             .y = 8,
+            .h = 8,
+            .w = 8,
         },
     });
     defer display.deinit();

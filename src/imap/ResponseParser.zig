@@ -59,6 +59,7 @@ pub fn next(self: *ResponseParser) ?Response {
                 return null;
             }
             const kind = self.reader.takeDelimiterExclusive(' ') catch return null;
+            _ = self.reader.takeByte() catch unreachable; // Skip space
             log.debug("KIND: {s}", .{kind});
             const value = self.reader.takeDelimiterInclusive('\n') catch return null;
             log.debug("VALUE: {s}", .{value});
@@ -66,7 +67,7 @@ pub fn next(self: *ResponseParser) ?Response {
             return Response{ .untagged = .{ .kind = kind, .value = value[0 .. value.len - 2] } };
         },
         .tag => {
-            const tag = self.reader.takeDelimiterExclusive(' ') catch return null;
+            const tag = (self.reader.takeDelimiter(' ') catch return null) orelse return null;
             std.debug.assert(tag.len == self.tag.len);
             log.debug("TAG: ({s}) == ({s})", .{ tag, self.tag });
             if (!std.mem.eql(u8, tag, self.tag)) {

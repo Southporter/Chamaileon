@@ -4,6 +4,7 @@ const log = std.log.scoped(.mailbox);
 
 pub const Config = @import("Config.zig");
 pub const ImapSession = @import("imap/Session.zig");
+pub const Uid = ImapSession.Uid;
 
 test {
     _ = @import("imap/Session.zig");

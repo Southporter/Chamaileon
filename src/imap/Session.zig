@@ -120,6 +120,10 @@ pub fn logout(self: *Session) void {
         log.err("Failed to write logout command to IMAP server: {}", .{err});
         return;
     };
+    self.flush() catch |err| {
+        log.err("Failed to flush logout command to IMAP server: {}", .{err});
+        return;
+    };
     var r = self.reader();
     const read = r.takeDelimiterInclusive('\n') catch |err| {
         log.err("Failed to read from IMAP server after logout command: {}", .{err});
@@ -149,7 +153,7 @@ pub fn noop(self: *Session) !void {
             log.err("Unexpected response from IMAP server: {s}", .{ok});
             return error.UnexpectedResponse;
         }
-        _ = try r.takeDelimiterInclusive('\n'); // Skip the rest of the line
+        _ = try r.takeDelimiter('\n'); // Skip the rest of the line
     }
 
     const res_tag = try r.take(4); // Skip "Sxxx"
@@ -219,13 +223,16 @@ pub fn startTls(session: *Session, config: ConnectOptions) !void {
     }
     var tag_buf: [4]u8 = undefined;
     const tag = std.fmt.bufPrint(&tag_buf, "S{d:0>3}", .{session.tag_id}) catch unreachable;
-    var w = &session.socket.writer.interface;
+
+    var w = session.writer();
     try w.print("{s} STARTTLS\r\n", .{tag});
+    try session.flush();
     log.info("StartTLS with server at {s}:{d}", .{ config.host, config.port });
-    var socket_reader = session.socket.reader;
+
+    const r = session.reader();
     var parser = ResponseParser{
         .tag = tag,
-        .reader = socket_reader.interface(),
+        .reader = r,
     };
     const cap = parser.next() orelse return error.UnexpectedResponse;
     if (cap.tagged.kind != .ok) {
@@ -233,7 +240,7 @@ pub fn startTls(session: *Session, config: ConnectOptions) !void {
         return error.StartTlsFailed;
     }
 
-    session.tls = try std.crypto.tls.Client.init(socket_reader.interface(), w, .{
+    session.tls = try std.crypto.tls.Client.init(r, w, .{
         // TODO: Add support for explicit host verification
         .host = .{ .no_verification = {} },
         .ca = .{ .self_signed = {} },
@@ -790,11 +797,16 @@ pub const Range = struct {
     max: u32 = 0,
 };
 
+pub const Uid = enum(u32) {
+    none = 0,
+    _,
+};
+
 pub const PreviewResult = struct {
     mail: std.ArrayListUnmanaged(Preview) = .empty,
 
     pub const Preview = struct {
-        uid: u32 = 0,
+        uid: Uid = .none,
         flags: std.EnumSet(MailboxDetails.Flags) = .initEmpty(),
         from: []const u8 = "",
         subject: []const u8 = "",
@@ -870,10 +882,11 @@ pub fn preview(self: *Session, alloc: std.mem.Allocator, range: Range) !PreviewR
         .id => {
             view = .{};
             const raw = try parser.get(.int);
-            view.uid = std.fmt.parseInt(u32, raw, 10) catch {
+            const uid = std.fmt.parseInt(u32, raw, 10) catch {
                 log.err("Failed to parse UID from FETCH response: {s}", .{raw});
                 return error.UnexpectedResponse;
             };
+            view.uid = @enumFromInt(uid);
             continue :parse .fetch;
         },
         .fetch => {

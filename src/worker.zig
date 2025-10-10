@@ -49,6 +49,7 @@ const Queue = struct {
 const Message = union(enum) {
     logout: void,
     select: mailbox.ImapSession.Box,
+    fetch: mailbox.Uid,
 };
 
 pub var queue: Queue = .{};
@@ -67,7 +68,6 @@ pub const State = struct {
     };
 
     pub fn deinit(self: *State, alloc: std.mem.Allocator) void {
-        @breakpoint();
         self.lock.lock();
         defer self.lock.unlock();
         self.boxes.deinit(alloc);
@@ -83,6 +83,7 @@ pub const State = struct {
 };
 
 pub fn worker(alloc: std.mem.Allocator, config: mailbox.Config, running: *bool, win: *dvui.Window) void {
+    defer log.info("Mailbox Worker exited", .{});
     log.info("Starting Mailbox Worker", .{});
     var ca_bundle = std.crypto.Certificate.Bundle{};
     defer ca_bundle.deinit(alloc);
@@ -154,6 +155,7 @@ pub fn worker(alloc: std.mem.Allocator, config: mailbox.Config, running: *bool, 
     }
     defer box_arena.deinit();
 
+    defer log.info("Mailbox Worker exiting", .{});
     while (running.*) {
         const start = std.time.milliTimestamp();
         if (queue.pop(std.time.ns_per_min * 1)) |msg| {
