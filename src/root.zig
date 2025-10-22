@@ -9,6 +9,7 @@ pub const Uid = ImapSession.Uid;
 test {
     _ = @import("imap/Session.zig");
     _ = @import("imap/Capability.zig");
+    _ = @import("imap/Email.zig");
     _ = @import("imap/ResponseParser.zig");
     _ = @import("imap/tokenize.zig");
 }

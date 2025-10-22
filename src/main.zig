@@ -50,6 +50,11 @@ pub fn main() !void {
     var win = try dvui.Window.init(@src(), gpa, backend.backend(), .{});
     defer win.deinit();
 
+    var font_iter = win.fonts.database.iterator();
+    while (font_iter.next()) |font| {
+        log.info("Loaded font: {s}, size: {any}", .{ font.value_ptr.name, font.value_ptr.bytes.len });
+    }
+
     var running = true;
 
     const config = try Config.load(gpa);
@@ -112,7 +117,9 @@ pub fn main() !void {
 
 // both dvui and SDL drawing
 fn gui_frame(page: ui.Page) ui.Page {
-    ui.menu();
+    if (ui.menu()) |p| {
+        return p;
+    }
 
     const next_page = switch (page) {
         .mailbox_select => ui.mailbox_select(gpa, background.state) catch |err| {
@@ -120,6 +127,7 @@ fn gui_frame(page: ui.Page) ui.Page {
             return .err;
         },
         .mailbox_list => ui.mailbox_list(gpa, background.state),
+        .mail_view => ui.view_mail(gpa, background.state),
         .err => ui.err(),
     };
 

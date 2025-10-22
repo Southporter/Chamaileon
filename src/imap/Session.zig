@@ -7,6 +7,7 @@ const Session = @This();
 const Capabilities = @import("Capability.zig");
 const ResponseParser = @import("ResponseParser.zig");
 const Parser = @import("Parser.zig");
+const decoding = @import("decoding.zig");
 
 const min_buffer_len = std.crypto.tls.Client.min_buffer_len;
 
@@ -107,6 +108,20 @@ fn flush(session: *Session) !void {
         try client.output.flush();
     } else try session.socket.writer.interface.flush();
 }
+fn cleanup(session: *Session, tag: []const u8) void {
+    var r = session.reader();
+    while (true) {
+        const line = r.takeDelimiterInclusive('\n') catch |err| {
+            session.state = .disconnected;
+            log.err("Failed to read from IMAP server during cleanup: {}", .{err});
+            return;
+        };
+        if (std.mem.startsWith(u8, line, tag)) {
+            log.info("Cleanup completed: {s}", .{line});
+            return;
+        }
+    }
+}
 
 /// Logs out from the IMAP server and closes the connection.
 /// If the session is already disconnected, this function does nothing.
@@ -133,12 +148,12 @@ pub fn logout(self: *Session) void {
 }
 
 pub fn noop(self: *Session) !void {
-    @breakpoint();
     if (self.state == .disconnected) {
         return error.InvalidState;
     }
     var tag_buf: [4]u8 = undefined;
     const tag = std.fmt.bufPrint(&tag_buf, "S{d:0>3}", .{self.tag_id}) catch unreachable;
+    errdefer self.cleanup(tag);
 
     var w = self.writer();
     try w.print("{s} NOOP\r\n", .{tag});
@@ -148,11 +163,7 @@ pub fn noop(self: *Session) !void {
 
     while ((try r.peekByte()) == '*') {
         _ = try r.take(2); // Skip "* "
-        const ok = try r.take(2);
-        if (ok[0] != 'O' or ok[1] != 'K') {
-            log.err("Unexpected response from IMAP server: {s}", .{ok});
-            return error.UnexpectedResponse;
-        }
+        // TODO: Handle expunges and fetches here
         _ = try r.takeDelimiter('\n'); // Skip the rest of the line
     }
 
@@ -194,6 +205,7 @@ pub fn capability(self: *Session, alloc: std.mem.Allocator) !Capabilities {
     }
     var tag_buf: [4]u8 = undefined;
     const tag = std.fmt.bufPrint(&tag_buf, "S{d:0>3}", .{self.tag_id}) catch unreachable;
+    errdefer self.cleanup(tag);
     const r = self.reader();
     var w = self.writer();
     try w.print("{s} CAPABILITY\r\n", .{tag});
@@ -480,6 +492,7 @@ pub fn list(self: *Session, alloc: std.mem.Allocator, root: []const u8, pattern:
     }
     var tag_buf: [4]u8 = undefined;
     const tag = std.fmt.bufPrint(&tag_buf, "S{d:0>3}", .{self.tag_id}) catch unreachable;
+    errdefer self.cleanup(tag);
 
     const w = self.writer();
 
@@ -690,6 +703,7 @@ pub fn select(self: *Session, mailbox: Box) !MailboxDetails {
     }
     var tag_buf: [4]u8 = undefined;
     const tag = std.fmt.bufPrint(&tag_buf, "S{d:0>3}", .{self.tag_id}) catch unreachable;
+    errdefer self.cleanup(tag);
 
     var w = self.writer();
     w.print("{s} SELECT {s}\r\n", .{ tag, mailbox.name }) catch |err| {
@@ -800,6 +814,13 @@ pub const Range = struct {
 pub const Uid = enum(u32) {
     none = 0,
     _,
+
+    pub fn format(
+        self: @This(),
+        formater: *std.Io.Writer,
+    ) std.Io.Writer.Error!void {
+        return formater.print("{d}", .{@intFromEnum(self)});
+    }
 };
 
 pub const PreviewResult = struct {
@@ -944,22 +965,28 @@ pub fn preview(self: *Session, alloc: std.mem.Allocator, range: Range) !PreviewR
             const header = parser.next() orelse return error.UnexpectedResponse;
             if (!parser.peekExpect(.colon)) return error.InvalidMessageHeader;
             var value: std.ArrayList(u8) = .empty;
+            defer value.deinit(alloc);
             while (try r.peekByte() == ' ') {
                 _ = try r.take(1); // consume the space
                 var line = try r.takeDelimiterInclusive('\n');
                 try value.appendSlice(alloc, line[0 .. line.len - 2]); // Strip CRLF
             }
             _ = parser.next() orelse return error.UnexpectedResponse; // prime the next token
-            if (header.tag == .keyword_subject) {
-                view.subject = try value.toOwnedSlice(alloc);
-            } else if (header.tag == .keyword_from) {
-                view.from = try value.toOwnedSlice(alloc);
-            } else if (header.tag == .keyword_date) {
+            if (header.tag == .keyword_date) {
                 view.date = try zeit.instant(.{
                     .source = .{
-                        .rfc2822 = value.items, // Strip CRLF
+                        .rfc2822 = value.items,
                     },
                 });
+                continue :parse .message_headers;
+            }
+            var encoded = std.Io.Reader.fixed(value.items);
+            var decoded = try std.Io.Writer.Allocating.initCapacity(alloc, value.items.len);
+            try decoding.mimeWord(&encoded, &decoded.writer);
+            if (header.tag == .keyword_subject) {
+                view.subject = try decoded.toOwnedSlice();
+            } else if (header.tag == .keyword_from) {
+                view.from = try decoded.toOwnedSlice();
             }
             continue :parse .message_headers;
         },
@@ -972,4 +999,146 @@ pub fn preview(self: *Session, alloc: std.mem.Allocator, range: Range) !PreviewR
         },
     }
     return error.UnexpectedResponse; // If we reach here, something went wrong
+}
+
+pub const Email = @import("Email.zig");
+
+const FetchReadState = enum {
+    untagged,
+    tagged,
+    id,
+    fetch,
+    content,
+};
+
+pub fn fetch(self: *Session, allocator: std.mem.Allocator, uid: Uid) !Email {
+    var tag_buf: [4]u8 = undefined;
+    const tag = std.fmt.bufPrint(&tag_buf, "S{d:0>3}", .{self.tag_id}) catch unreachable;
+    errdefer self.cleanup(tag);
+    defer self.tag_id += 1;
+    const r = self.reader();
+
+    var w = self.writer();
+    w.print("{s} FETCH {f} RFC822\r\n", .{ tag, uid }) catch |err| {
+        log.err("Failed to write FETCH RFC822 command to IMAP server: {}", .{err});
+        return err;
+    };
+    try self.flush();
+
+    var parser: Parser = .init(r);
+    var email = Email{
+        .arena = .init(allocator),
+    };
+    errdefer email.deinit();
+    parse: switch (FetchReadState.untagged) {
+        .untagged => {
+            if (parser.peekExpect(.asterisk)) {
+                parser.expect(.asterisk) catch unreachable;
+                continue :parse .id;
+            } else {
+                continue :parse .tagged;
+            }
+        },
+        .tagged => {
+            try parser.expectIdentifier(tag);
+            try parser.expect(.keyword_ok);
+            self.tag_id += 1;
+            _ = try r.takeDelimiterInclusive('\n');
+            try email.parse();
+            return email;
+        },
+        .id => {
+            const raw = try parser.get(.int);
+            const parse_uid: Uid = @enumFromInt(std.fmt.parseInt(u32, raw, 10) catch {
+                log.err("Failed to parse UID from FETCH response: {s}", .{raw});
+                return error.UnexpectedResponse;
+            });
+            if (parse_uid != uid) {
+                log.err("Fetched UID does not match requested UID: fetched {d}, requested {d}", .{ @intFromEnum(parse_uid), @intFromEnum(uid) });
+                return error.UnexpectedResponse;
+            }
+            continue :parse .fetch;
+        },
+        .fetch => {
+            try parser.expect(.keyword_fetch);
+            try parser.expect(.l_paren);
+            try parser.expect(.keyword_rfc822);
+            continue :parse .content;
+        },
+        .content => {
+            try parser.expect(.l_brace);
+            const size_raw = try parser.get(.int);
+            const size = std.fmt.parseInt(usize, size_raw, 10) catch {
+                log.err("Failed to parse RFC822 size from FETCH response: {s}", .{size_raw});
+                return error.UnexpectedResponse;
+            };
+            try parser.expect(.r_brace);
+            const body_buffer = try email.alloc(size);
+            var body_writer = std.Io.Writer.fixed(body_buffer);
+            try r.streamExact(&body_writer, size);
+            email.body_full = body_buffer;
+            _ = parser.next() orelse return error.UnexpectedResponse; // Prime the next token
+            const peek = parser.peek() orelse return error.UnexpectedResponse;
+
+            if (peek.tag == .keyword_flags) {
+                parser.expect(.keyword_flags) catch unreachable;
+                try parser.expect(.l_paren);
+                while (parser.peek()) |tok| {
+                    if (tok.tag == .r_paren) {
+                        parser.expect(.r_paren) catch unreachable;
+                        break;
+                    }
+                    if (MailboxDetails.Flags.parse(parser.value())) |flag| {
+                        log.debug("Email has flag: {any}", .{flag});
+                    }
+                    _ = parser.next();
+                }
+            }
+
+            try parser.expect(.r_paren);
+            try parser.expect(.crlf);
+            continue :parse .tagged;
+        },
+    }
+    return error.UnexpectedResponse; // If we reach here, something went wrong
+}
+
+test "fetchNoFlags" {
+    const rfc = "Content-Type: multipart/alternative; boundary=\"BONDARY\"\r\n" ++
+        "Subject: Test Email\r\n" ++
+        "From: test@example.com\r\n" ++
+        "To: me@examples.com\r\n" ++
+        "\r\n" ++
+        "--BONDARY\r\n" ++
+        "Content-Type: text/plain; charset=\"utf-8\"\r\n" ++
+        "\r\n" ++
+        "This is the plain text part of the email.\r\n" ++
+        "--BONDARY\r\n" ++
+        "Content-Type: text/html; charset=\"utf-8\"\r\n" ++
+        "\r\n" ++
+        "<html><body><p>This is the HTML part of the email.</p></body></html>\r\n" ++
+        "--BONDARY--\r\n";
+
+    const input = std.fmt.comptimePrint("* FETCH (RFC822 {d}\r\n{s})\r\nS001 OK FETCH completed\r\n", .{ rfc.len, rfc });
+
+    _ = input;
+}
+test "fetchFlags" {
+    const rfc = "Content-Type: multipart/alternative; boundary=\"BONDARY\"\r\n" ++
+        "Subject: Test Email\r\n" ++
+        "From: test@example.com\r\n" ++
+        "To: me@examples.com\r\n" ++
+        "\r\n" ++
+        "--BONDARY\r\n" ++
+        "Content-Type: text/plain; charset=\"utf-8\"\r\n" ++
+        "\r\n" ++
+        "This is the plain text part of the email.\r\n" ++
+        "--BONDARY\r\n" ++
+        "Content-Type: text/html; charset=\"utf-8\"\r\n" ++
+        "\r\n" ++
+        "<html><body><p>This is the HTML part of the email.</p></body></html>\r\n" ++
+        "--BONDARY--\r\n";
+
+    const input = std.fmt.comptimePrint("* FETCH (RFC822 {d}\r\n{s} FLAGS (\\Seen))\r\nS001 OK FETCH completed\r\n", .{ rfc.len, rfc });
+    _ = input;
 }

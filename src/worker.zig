@@ -62,6 +62,7 @@ pub const State = struct {
     data: Data = .{},
     details: ?mailbox.ImapSession.MailboxDetails = null,
     preview: ?mailbox.ImapSession.PreviewResult = null,
+    visible_mail: ?mailbox.ImapSession.Email = null,
 
     const Data = struct {
         details: []const u8 = "",
@@ -78,6 +79,10 @@ pub const State = struct {
         if (self.details) |d| {
             d.deinit(alloc);
             self.details = null;
+        }
+        if (self.visible_mail) |m| {
+            m.deinit(alloc);
+            self.visible_mail = null;
         }
     }
 };
@@ -183,6 +188,7 @@ pub fn worker(alloc: std.mem.Allocator, config: mailbox.Config, running: *bool, 
                         log.err("Failed to fetch mailbox details: {}", .{err});
                         continue;
                     };
+                    std.mem.sort(mailbox.ImapSession.PreviewResult.Preview, preview.mail.items, {}, previewCompare);
                     {
                         state.lock.lock();
                         defer state.lock.unlock();
@@ -191,6 +197,18 @@ pub fn worker(alloc: std.mem.Allocator, config: mailbox.Config, running: *bool, 
                     dvui.refresh(win, @src(), @enumFromInt(13131313));
 
                     log.info("Fetched mailbox details for '{f}'", .{preview});
+                },
+                .fetch => {
+                    log.info("Fetching message with UID: {d}", .{msg.fetch});
+                    const fetch_res = session.fetch(alloc, msg.fetch) catch |err| {
+                        log.err("Failed to fetch message UID {d}: {any}", .{ msg.fetch, err });
+                        continue;
+                    };
+                    {
+                        state.lock.lock();
+                        defer state.lock.unlock();
+                        state.visible_mail = fetch_res;
+                    }
                 },
             }
         } else {
@@ -201,6 +219,15 @@ pub fn worker(alloc: std.mem.Allocator, config: mailbox.Config, running: *bool, 
             };
         }
     }
+}
+
+fn previewCompare(ctx: void, a: mailbox.ImapSession.PreviewResult.Preview, b: mailbox.ImapSession.PreviewResult.Preview) bool {
+    _ = ctx;
+    const a_milli = a.date.milliTimestamp();
+    const b_milli = b.date.milliTimestamp();
+
+    // Reverse order (newest first)
+    return a_milli > b_milli;
 }
 
 test "Queue" {

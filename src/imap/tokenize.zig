@@ -50,6 +50,8 @@ pub const Token = struct {
         .{ "FROM", .keyword_from },
         .{ "Date", .keyword_date },
         .{ "DATE", .keyword_date },
+        .{ "INTERNALDATE", .keyword_internaldate },
+        .{ "RFC822", .keyword_rfc822 },
     });
 
     pub fn getKeyword(bytes: []const u8) ?Tag {
@@ -118,6 +120,8 @@ pub const Token = struct {
         keyword_subject,
         keyword_from,
         keyword_date,
+        keyword_internaldate,
+        keyword_rfc822,
 
         eof,
     };

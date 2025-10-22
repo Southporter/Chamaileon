@@ -1,14 +1,17 @@
-pub const dvui = @import("dvui");
+const std = @import("std");
+const dvui = @import("dvui");
 pub const mailbox_select = @import("ui/box_select.zig").render;
 pub const mailbox_list = @import("ui/mailbox_list.zig").render;
+pub const view_mail = @import("ui/view_mail.zig").render;
 
 pub const Page = enum {
     mailbox_select,
     mailbox_list,
+    mail_view,
     err,
 };
 
-pub fn menu() void {
+pub fn menu() ?Page {
     var m = dvui.menu(@src(), .horizontal, .{ .background = true, .expand = .horizontal });
     defer m.deinit();
 
@@ -21,12 +24,20 @@ pub fn menu() void {
         }
     }
 
-    if (dvui.menuItemLabel(@src(), "Edit", .{ .submenu = true }, .{ .expand = .none })) |r| {
+    if (dvui.menuItemLabel(@src(), "Move To", .{ .submenu = true }, .{ .expand = .none })) |r| {
         var fw = dvui.floatingMenu(@src(), .{ .from = r }, .{});
         defer fw.deinit();
-        _ = dvui.menuItemLabel(@src(), "Dummy", .{}, .{ .expand = .horizontal });
-        _ = dvui.menuItemLabel(@src(), "Dummy Long", .{}, .{ .expand = .horizontal });
-        _ = dvui.menuItemLabel(@src(), "Dummy Super Long", .{}, .{ .expand = .horizontal });
+
+        for (std.enums.values(Page), 0..) |page, i| {
+            if (dvui.menuItemLabel(@src(), switch (page) {
+                .mailbox_select => "Mailbox Select",
+                .mailbox_list => "Mailbox List",
+                .mail_view => "Mail View",
+                .err => "Error Page",
+            }, .{}, .{ .expand = .horizontal, .id_extra = i }) != null) {
+                return page;
+            }
+        }
     }
     if (dvui.menuItemLabel(@src(), "Demo", .{ .submenu = true }, .{ .expand = .none })) |r| {
         var fw = dvui.floatingMenu(@src(), .{ .from = r }, .{});
@@ -37,6 +48,7 @@ pub fn menu() void {
             dvui.Examples.show_demo_window = !dvui.Examples.show_demo_window;
         }
     }
+    return null;
 }
 
 pub fn err() Page {

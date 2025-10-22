@@ -19,12 +19,19 @@ pub fn build(b: *std.Build) void {
     });
     lib_mod.addImport("zeit", zeit.module("zeit"));
 
+    const superhtml = b.dependency("superhtml", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    lib_mod.addImport("superhtml", superhtml.module("superhtml"));
+
     const exe_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
     });
     exe_mod.addImport("mailbox", lib_mod);
+    exe_mod.addImport("superhtml", superhtml.module("superhtml"));
 
     const exe = b.addExecutable(.{
         .name = "mailbox",

@@ -9,12 +9,7 @@ pub fn render(alloc: std.mem.Allocator, state: background.State) !Page {
         .dir = .vertical,
     }, .{
         .expand = .both,
-        .padding = .{
-            .x = 8,
-            .y = 8,
-            .h = 8,
-            .w = 8,
-        },
+        .color_fill = .white,
     });
     defer display.deinit();
 
@@ -22,7 +17,7 @@ pub fn render(alloc: std.mem.Allocator, state: background.State) !Page {
     if (boxes.len == 0) {
         var container = dvui.flexbox(@src(), .{
             .justify_content = .center,
-        }, .{});
+        }, .{ .expand = .both });
         defer container.deinit();
         var text = dvui.textLayout(@src(), .{}, .{});
         defer text.deinit();
