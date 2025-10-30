@@ -5,7 +5,6 @@ const Page = @import("../ui.zig").Page;
 
 pub fn render(alloc: std.mem.Allocator, state: background.State) Page {
     _ = alloc;
-
     if (state.preview) |preview| {
         var content = dvui.box(@src(), .{
             .dir = .vertical,
@@ -30,6 +29,7 @@ pub fn render(alloc: std.mem.Allocator, state: background.State) Page {
                 .margin = .all(4),
                 .id_extra = id_extra,
                 .color_border = .teal,
+                .border = .all(2),
             });
             defer item_box.deinit();
 
@@ -45,7 +45,7 @@ pub fn render(alloc: std.mem.Allocator, state: background.State) Page {
             var writer = std.Io.Writer.fixed(&date_buf);
             item.date.time().strftime(&writer, "%Y-%m-%d %H:%M") catch unreachable;
 
-            dvui.label(@src(), "{s}", .{item.subject}, .{ .id_extra = @intFromEnum(item.uid), .font_style = .title_1 });
+            dvui.label(@src(), "{s}", .{item.subject}, .{ .id_extra = @intFromEnum(item.uid), .font_style = .title_3 });
             var details_box = dvui.box(@src(), .{
                 .dir = .horizontal,
             }, .{
@@ -53,8 +53,8 @@ pub fn render(alloc: std.mem.Allocator, state: background.State) Page {
                 .id_extra = id_extra,
             });
             defer details_box.deinit();
-            dvui.label(@src(), "From: {s}", .{item.from}, .{ .id_extra = id_extra, .font_style = .title_3 });
-            dvui.label(@src(), "Date: {s}", .{date_buf[0..writer.end]}, .{ .id_extra = id_extra, .font_style = .title_4 });
+            dvui.label(@src(), "From: {s}", .{item.from}, .{ .id_extra = id_extra, .font_style = .title_4 });
+            dvui.label(@src(), "{s}", .{date_buf[0..writer.end]}, .{ .id_extra = id_extra, .font_style = .title_4 });
         }
         return .mailbox_list;
     } else {

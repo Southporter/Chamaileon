@@ -73,29 +73,60 @@ pub fn render(alloc: std.mem.Allocator, state: background.State) Page {
                 var link_id: usize = 42;
                 while (iter.next()) |line| {
                     var start: usize = 0;
+                    // var parts = std.mem.splitScalar(u8, line, ' ');
+                    // const first = parts.next() orelse continue; // Skip empty lines
+                    // //
+                    const options: dvui.Options = .{};
+                    // TODO: Add Mardown viewing support
+                    //
+                    // const header_depth = std.mem.count(u8, first, "#"); // Check for markdown header
+                    // switch (header_depth) {
+                    //     1 => options.font_style = .title_1,
+                    //     2 => options.font_style = .title_2,
+                    //     3 => options.font_style = .title_3,
+                    //     4 => options.font_style = .title_4,
+                    //     5 => options.font_style = .heading,
+                    //     6 => options.font_style = .caption_heading,
+                    //     else => {},
+                    // }
+                    // const quote_depth = std.mem.count(u8, line, ">"); // Check for blockquote
+                    // if (quote_depth > 0) {
+                    //     options.margin = .{
+                    //         .x = 16,
+                    //         .w = 4,
+                    //         .h = 0,
+                    //         .y = 0,
+                    //     };
+                    //     options.border = .{ .x = 4 };
+                    // }
+                    //
+                    // start = parts.index orelse 0;
+
                     while (std.mem.indexOf(u8, line[start..], "https://")) |link_start_rel| {
                         defer link_id += 1;
                         const link_start = start + link_start_rel;
                         const link_end = std.mem.indexOfAny(u8, line[link_start..], " \t") orelse line.len - link_start;
                         const url = line[link_start .. link_end + link_start];
+                        var options_with_id_extra = options;
+                        options_with_id_extra.id_extra = link_id;
                         if (std.mem.eql(u8, line[link_start -| 2..link_start], "](")) {
                             // Find start of markdown link
                             const md_link_start = std.mem.lastIndexOf(u8, line[0 .. link_start - 2], "[") orelse 0;
-                            text_layout.addText(line[start..md_link_start], .{});
+                            text_layout.addText(line[start..md_link_start], options);
                             text_layout.addLink(.{
                                 .url = url,
                                 .text = line[md_link_start + 1 .. link_start - 2],
-                            }, .{ .id_extra = link_id });
+                            }, options_with_id_extra);
                         } else {
-                            text_layout.addText(line[start..link_start], .{});
+                            text_layout.addText(line[start..link_start], options);
                             text_layout.addLink(.{
                                 .url = url,
-                            }, .{ .id_extra = link_id });
+                            }, options_with_id_extra);
                         }
                         start = link_start + link_end;
                     }
-                    text_layout.addText(line[start..], .{});
-                    text_layout.addText("\n", .{});
+                    text_layout.addText(line[start..], options);
+                    text_layout.addText("\n", options);
                 }
             },
             .text_html => |html| {

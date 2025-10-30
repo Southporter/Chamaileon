@@ -33,6 +33,10 @@ pub fn main() !void {
         dvui.Backend.Common.windowsAttachConsole() catch {};
     }
 
+    // const fira_code_bytes = @embedFile("fonts/FiraCode-Regular.ttf");
+    const fira_code_bytes = try loadFont(gpa, "FiraCodeNerdFont_Regular.ttf");
+    defer gpa.free(fira_code_bytes);
+
     // init SDL backend (creates and owns OS window)
     var backend = try Backend.initWindow(.{
         .allocator = gpa,
@@ -50,10 +54,18 @@ pub fn main() !void {
     var win = try dvui.Window.init(@src(), gpa, backend.backend(), .{});
     defer win.deinit();
 
-    var font_iter = win.fonts.database.iterator();
-    while (font_iter.next()) |font| {
-        log.info("Loaded font: {s}, size: {any}", .{ font.value_ptr.name, font.value_ptr.bytes.len });
-    }
+    const fira_code_cache: dvui.Font.Cache.TTFEntry = .{
+        .name = "FiraCode",
+        .bytes = fira_code_bytes,
+        .allocator = null,
+    };
+    try win.fonts.database.put(gpa, .fromName("FiraCode"), fira_code_cache);
+    win.theme.font_body.id = .fromName("FiraCode");
+    _ = try win.fonts.getOrCreate(gpa, win.theme.font_body);
+    win.theme.font_title_3.id = .fromName("FiraCode");
+    _ = try win.fonts.getOrCreate(gpa, win.theme.font_title_3);
+    win.theme.font_title_4.id = .fromName("FiraCode");
+    _ = try win.fonts.getOrCreate(gpa, win.theme.font_title_4);
 
     var running = true;
 
@@ -134,6 +146,24 @@ fn gui_frame(page: ui.Page) ui.Page {
     dvui.Examples.demo();
 
     return next_page;
+}
+
+const known_folders = @import("known-folders");
+fn loadFont(alloc: std.mem.Allocator, name: []const u8) ![]const u8 {
+    // Load fira from local
+    var fonts = try known_folders.open(alloc, .home, .{}) orelse return error.FontsFolderNotFound;
+    defer fonts.close();
+
+    var dir = try fonts.openDir(".local/share/fonts/f", .{});
+    defer dir.close();
+
+    const regular = try dir.openFile(name, .{});
+    var bytes = std.Io.Writer.Allocating.init(alloc);
+    var buf: [4096]u8 = undefined;
+    var reader = regular.reader(&buf);
+    _ = try reader.interface.streamRemaining(&bytes.writer);
+    try bytes.writer.writeByte(0);
+    return bytes.toOwnedSlice();
 }
 
 test {

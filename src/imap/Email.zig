@@ -3,7 +3,9 @@
 ///
 const std = @import("std");
 const superhtml = @import("superhtml");
-const decoding = @import("decoding.zig");
+const mani = @import("mani");
+const decoding = mani.decode;
+const convert = mani.convert;
 const log = std.log.scoped(.email_rfc822);
 const Email = @This();
 
@@ -28,6 +30,7 @@ parts: [4]Part = @splat(.{
 const Charset = enum {
     utf_8,
     iso_8859_1,
+    us_ascii,
     unknown,
 
     pub fn fromString(value: []const u8) Charset {
@@ -35,6 +38,8 @@ const Charset = enum {
             return .utf_8;
         } else if (std.ascii.eqlIgnoreCase(value, "iso-8859-1")) {
             return .iso_8859_1;
+        } else if (std.ascii.eqlIgnoreCase(value, "us-ascii")) {
+            return .us_ascii;
         } else {
             log.warn("Unknown charset: {s}", .{value});
             return .unknown;
@@ -43,11 +48,12 @@ const Charset = enum {
 };
 
 /// Content types supported in email parts.
-/// Currently supports text/plain, text/html, multipart/mixed, multipart/alternative.
+/// Currently supports text/plain, text/html, text/calendar multipart/mixed, multipart/alternative.
 /// Anything else is considered unknown.
 const ContentType = enum {
     text_plain,
     text_html,
+    text_calendar,
     multipart_mixed,
     multipart_alternative,
     multipart_related,
@@ -56,6 +62,8 @@ const ContentType = enum {
     pub fn fromString(value: []const u8) ContentType {
         if (std.mem.eql(u8, value, "text/plain")) {
             return .text_plain;
+        } else if (std.mem.eql(u8, value, "text/html")) {
+            return .text_html;
         } else if (std.mem.eql(u8, value, "text/html")) {
             return .text_html;
         } else if (std.mem.eql(u8, value, "multipart/mixed")) {
@@ -106,6 +114,10 @@ const Part = struct {
         text_plain: []const u8,
         text_html: struct {
             ast: *superhtml.html.Ast,
+            src: []const u8,
+        },
+        text_calendar: struct {
+            method: enum { publish, request, cancel, reply },
             src: []const u8,
         },
         multipart_mixed: void,
@@ -217,8 +229,61 @@ pub fn parse(self: *Email) !void {
                 },
             };
         },
+        .text_calendar => {
+            self.parts[0] = .{
+                .content = .{
+                    .text_calendar = .{
+                        .method = .request,
+                        .src = self.body_full[headers_end..],
+                    },
+                },
+            };
+        },
         .multipart_mixed => {
-            log.warn("Multipart/mixed not yet supported", .{});
+            const boundary_prefix = "boundary=";
+            var boundary: []const u8 = "";
+            while (part_iter.next()) |part| {
+                var trimmed = std.mem.trim(u8, part, " \r\n\t");
+                if (std.mem.startsWith(u8, trimmed, boundary_prefix)) {
+                    boundary = std.mem.trim(u8, trimmed[boundary_prefix.len..trimmed.len], "\""); // Strip quotes
+                    break;
+                }
+            }
+            if (boundary.len == 0) {
+                log.err("Multipart email missing boundary in Content-Type: {?s}", .{content_type});
+                return error.InvalidContentType;
+            }
+            var parser = Parser{
+                .input = .fixed(self.body_full[headers_end..]),
+            };
+            parser.skipWhitespace();
+            try parser.expectSlice("--");
+            try parser.expectSlice(boundary);
+            try parser.crlf();
+            var part_index: usize = 0;
+            var start_index: usize = parser.input.seek;
+            var line_it = std.mem.splitSequence(u8, parser.input.buffer[start_index..], "\r\n");
+            while (line_it.next()) |line| {
+                if (std.mem.startsWith(u8, line, "--") and std.mem.eql(u8, line[2..], boundary)) {
+                    var email = Email{
+                        .arena = self.arena,
+                        .body_full = parser.input.buffer[start_index..line_it.index.?],
+                    };
+                    email.parse() catch |err| {
+                        log.err("Failed to parse multipart/mixed part: {any}", .{err});
+                        return err;
+                    };
+                    for (email.parts) |part| {
+                        if (std.meta.activeTag(part.content) == .unknown) {
+                            break;
+                        }
+                        std.debug.assert(part_index < self.parts.len);
+                        self.parts[part_index] = part;
+                        part_index += 1;
+                    }
+                    start_index = line_it.index.?;
+                }
+            }
         },
         .multipart_related => {
             log.warn("Multipart/related not yet supported", .{});
@@ -280,6 +345,14 @@ pub fn parse(self: *Email) !void {
                                         .text_html = undefined,
                                     };
                                 },
+                                .text_calendar => {
+                                    part.content = .{
+                                        .text_calendar = .{
+                                            .method = .request,
+                                            .src = self.body_full[0..0],
+                                        },
+                                    };
+                                },
                                 .multipart_mixed => {
                                     part.content = .{
                                         .multipart_mixed = {},
@@ -308,11 +381,7 @@ pub fn parse(self: *Email) !void {
                                     var trimmed = std.mem.trim(u8, param, " ");
                                     if (std.mem.startsWith(u8, trimmed, "charset=")) {
                                         var charset_value = trimmed["charset=".len..];
-                                        if (std.mem.startsWith(u8, charset_value, "\"") and
-                                            std.mem.endsWith(u8, charset_value, "\""))
-                                        {
-                                            charset_value = charset_value[1 .. charset_value.len - 1];
-                                        }
+                                        charset_value = std.mem.trim(u8, charset_value, "\"");
                                         part.charset = Charset.fromString(charset_value);
                                     }
                                 }
@@ -337,39 +406,46 @@ pub fn parse(self: *Email) !void {
                         _ = parser.until('\r') catch break;
                     }
                     const content_end = parser.input.seek;
+                    const in_utf8 = switch (part.charset) {
+                        // US ASCII is a subset of UTF-8
+                        .utf_8, .us_ascii => parser.input.buffer[content_start..content_end],
+                        .iso_8859_1 => blk: {
+                            var writer = try std.Io.Writer.Allocating.initCapacity(self.arena.allocator(), content_end - content_start);
+                            var reader: std.Io.Reader = .fixed(parser.input.buffer[content_start..content_end]);
+                            try convert.iso8859_1ToUtf8(&reader, &writer.writer);
+                            break :blk try writer.toOwnedSlice();
+                        },
+                        .unknown => blk: {
+                            log.warn("Unknown charset for text/plain part ({t}), assuming utf-8", .{part.charset});
+                            break :blk parser.input.buffer[content_start..content_end];
+                        },
+                    };
+                    const decoded = switch (part.content_encoding) {
+                        .quoted_printable => try decoding.quotedPrintable(@constCast(in_utf8), .{}),
+                        .base64 => try decoding.base64(collapseLines(@constCast(in_utf8))),
+                        else => in_utf8,
+                    };
                     switch (part.content) {
                         .text_html => {
                             const ast = try self.arena.allocator().create(superhtml.html.Ast);
-                            const src = switch (part.content_encoding) {
-                                .quoted_printable => try decoding.quotedPrintable(@constCast(parser.input.buffer[content_start..content_end]), .{}),
-                                .base64 => try decoding.base64(@constCast(parser.input.buffer[content_start..content_end])),
-                                else => parser.input.buffer[content_start..content_end],
-                            };
-
-                            ast.* = try superhtml.html.Ast.init(self.arena.allocator(), src, .html, false);
+                            ast.* = try superhtml.html.Ast.init(self.arena.allocator(), decoded, .html, false);
                             part.content = .{
                                 .text_html = .{
                                     .ast = ast,
-                                    .src = src,
+                                    .src = decoded,
                                 },
                             };
                         },
                         .text_plain => {
-                            switch (part.content_encoding) {
-                                .quoted_printable => {
-                                    // Can const cast because decoding returns a slice into the same buffer
-                                    const decoded = try decoding.quotedPrintable(@constCast(parser.input.buffer[content_start..content_end]), .{});
-                                    part.content = .{ .text_plain = decoded };
+                            part.content = .{ .text_plain = decoded };
+                        },
+                        .text_calendar => {
+                            part.content = .{
+                                .text_calendar = .{
+                                    .method = .request,
+                                    .src = decoded,
                                 },
-                                .base64 => {
-                                    const decoded = try decoding.base64(@constCast(parser.input.buffer[content_start..content_end]));
-                                    part.content = .{ .text_plain = decoded };
-                                },
-                                else => {
-                                    part.content = .{ .text_plain = parser.input.buffer[content_start..content_end] };
-                                },
-                            }
-                            part.content = .{ .text_plain = parser.input.buffer[content_start..content_end] };
+                            };
                         },
                         else => {},
                     }
@@ -539,6 +615,22 @@ test "Quoted-Printable Encoding" {
     try std.testing.expectEqual(.quoted_printable, email.parts[0].content_encoding);
     try std.testing.expectEqualStrings(email.parts[0].content.text_plain, "This is a test email body with quoted-printable encoding.\nHere is a line break.\nAnd some special characters: \xC3\xA9, \xC3\xB1, \xC3\xBC.\r\n");
 }
-test {
-    _ = @import("decoding.zig");
+
+fn collapseLines(input: []u8) []u8 {
+    var writer: std.Io.Writer = .fixed(input);
+    var iter = std.mem.splitSequence(u8, input, "\r\n");
+    var tmp_buffer: [128]u8 = undefined;
+    while (iter.next()) |line| {
+        @memcpy(tmp_buffer[0..line.len], line);
+        writer.writeAll(tmp_buffer[0..line.len]) catch unreachable;
+    }
+    return input[0..writer.end];
+}
+
+test "collapseLines" {
+    const input = try std.testing.allocator.dupe(u8, "This is a\r\n line with continuation \r\non multiple lines.\r\n");
+    defer std.testing.allocator.free(input);
+    const expected = "This is a line with continuation on multiple lines.";
+    const result = collapseLines(input);
+    try std.testing.expectEqualStrings(expected, result);
 }

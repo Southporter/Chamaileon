@@ -9,3 +9,5 @@ mise.toml
 # JJ version control
 .jj/
 .crush/
+
+src/fonts/

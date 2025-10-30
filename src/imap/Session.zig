@@ -7,7 +7,9 @@ const Session = @This();
 const Capabilities = @import("Capability.zig");
 const ResponseParser = @import("ResponseParser.zig");
 const Parser = @import("Parser.zig");
-const decoding = @import("decoding.zig");
+const Email = @import("Email.zig");
+
+const decoding = @import("mani").decode;
 
 const min_buffer_len = std.crypto.tls.Client.min_buffer_len;
 
@@ -1000,8 +1002,6 @@ pub fn preview(self: *Session, alloc: std.mem.Allocator, range: Range) !PreviewR
     }
     return error.UnexpectedResponse; // If we reach here, something went wrong
 }
-
-pub const Email = @import("Email.zig");
 
 const FetchReadState = enum {
     untagged,

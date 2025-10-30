@@ -21,6 +21,7 @@ pub fn quotedPrintable(src: []u8, options: QuotedPrintableOptions) ![]u8 {
             std.debug.assert(read < src.len);
             if (src[read] == '\n' or src[read] == '\r') {
                 // Soft line break, skip
+                read += 1;
                 continue;
             }
             _ = try std.fmt.hexToBytes(src[write .. write + 1], src[read - 1 .. read + 1]);
@@ -241,7 +242,7 @@ test "quoted-printable decoding" {
     const duped = try std.testing.allocator.dupe(u8, input);
     defer std.testing.allocator.free(duped);
     const expected = "Hello, World!\nThis is a test.\n";
-    const decoded = try quotedPrintable(duped);
+    const decoded = try quotedPrintable(duped, .{});
     try std.testing.expectEqualStrings(expected, decoded);
 }
 
@@ -250,7 +251,16 @@ test "quoted-printable decoding with no encoded chars" {
     const duped = try std.testing.allocator.dupe(u8, input);
     defer std.testing.allocator.free(duped);
     const expected = "Just a normal string with no encoding.";
-    const decoded = try quotedPrintable(duped);
+    const decoded = try quotedPrintable(duped, .{});
+    try std.testing.expectEqualStrings(expected, decoded);
+}
+
+test "quoted-printable with newlines in a header" {
+    const input: []const u8 = "Hello=2C=20World=21=\r\nThis=20is=20a=20test=2E=0A";
+    const duped = try std.testing.allocator.dupe(u8, input);
+    defer std.testing.allocator.free(duped);
+    const expected = "Hello, World!This is a test.\n";
+    const decoded = try quotedPrintable(duped, .{ .header_space = true });
     try std.testing.expectEqualStrings(expected, decoded);
 }
 

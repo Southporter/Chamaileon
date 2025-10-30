@@ -62,7 +62,7 @@ pub const State = struct {
     data: Data = .{},
     details: ?mailbox.ImapSession.MailboxDetails = null,
     preview: ?mailbox.ImapSession.PreviewResult = null,
-    visible_mail: ?mailbox.ImapSession.Email = null,
+    visible_mail: ?mailbox.Email = null,
 
     const Data = struct {
         details: []const u8 = "",
@@ -81,7 +81,7 @@ pub const State = struct {
             self.details = null;
         }
         if (self.visible_mail) |m| {
-            m.deinit(alloc);
+            m.deinit();
             self.visible_mail = null;
         }
     }
@@ -200,6 +200,14 @@ pub fn worker(alloc: std.mem.Allocator, config: mailbox.Config, running: *bool, 
                 },
                 .fetch => {
                     log.info("Fetching message with UID: {d}", .{msg.fetch});
+                    {
+                        state.lock.lock();
+                        defer state.lock.unlock();
+                        if (state.visible_mail) |*m| {
+                            m.deinit();
+                        }
+                        state.visible_mail = null;
+                    }
                     const fetch_res = session.fetch(alloc, msg.fetch) catch |err| {
                         log.err("Failed to fetch message UID {d}: {any}", .{ msg.fetch, err });
                         continue;
