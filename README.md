@@ -6,7 +6,9 @@ If you have questions or issues, please open a discussion.
 
 ### Dependencies
 DVUI (UI) - https://david-vanderson.github.io/
+
 SuperHTML - https://github.com/kristoff-it/superhtml
+
 SDL 3
 
 ## Building
