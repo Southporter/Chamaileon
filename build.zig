@@ -13,6 +13,17 @@ pub fn build(b: *std.Build) void {
 
     const known_folders = b.dependency("known_folders", .{}).module("known-folders");
     lib_mod.addImport("known-folders", known_folders);
+    const zeit = b.dependency("zeit", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    lib_mod.addImport("zeit", zeit.module("zeit"));
+
+    const superhtml = b.dependency("superhtml", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    lib_mod.addImport("superhtml", superhtml.module("superhtml"));
 
     const exe_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
@@ -20,10 +31,12 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     exe_mod.addImport("mailbox", lib_mod);
+    exe_mod.addImport("superhtml", superhtml.module("superhtml"));
 
     const exe = b.addExecutable(.{
         .name = "mailbox",
         .root_module = exe_mod,
+        .use_llvm = true,
     });
 
     const dvui_dep = b.dependency("dvui", .{
@@ -45,6 +58,14 @@ pub fn build(b: *std.Build) void {
 
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);
+
+    const check_exe = b.addExecutable(.{
+        .name = "mailbox",
+        .root_module = exe_mod,
+    });
+
+    const check_step = b.step("check", "Run the compiler's code checks");
+    check_step.dependOn(&check_exe.step);
 
     const lib_unit_tests = b.addTest(.{
         .root_module = lib_mod,

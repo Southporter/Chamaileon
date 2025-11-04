@@ -3,9 +3,13 @@ const builtin = @import("builtin");
 const log = std.log.scoped(.mailbox);
 
 pub const Config = @import("Config.zig");
-pub const ImapSession = @import("ImapSession.zig");
-
+pub const ImapSession = @import("imap/Session.zig");
+pub const Uid = ImapSession.Uid;
 
 test {
-    _ = @import("ImapSession.zig");
+    _ = @import("imap/Session.zig");
+    _ = @import("imap/Capability.zig");
+    _ = @import("imap/Email.zig");
+    _ = @import("imap/ResponseParser.zig");
+    _ = @import("imap/tokenize.zig");
 }

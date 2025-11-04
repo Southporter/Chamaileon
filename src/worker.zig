@@ -1,14 +1,14 @@
 const std = @import("std");
 const mailbox = @import("mailbox");
 const log = std.log.scoped(.worker);
+const dvui = @import("dvui");
 
 const Queue = struct {
-    lock: std.atomic.Value(u32) = .init(0),
+    mutex: std.Thread.Mutex = .{},
+    cond: std.Thread.Condition = .{},
     messages: [8]Message = undefined,
     read_index: u8 = 0,
     write_index: u8 = 0,
-
-    const WAKE_VALUE: u32 = 3232;
 
     pub fn push(self: *Queue, msg: Message) !void {
         if (self.read_index == self.write_index + 1) {
@@ -20,37 +20,36 @@ const Queue = struct {
         if (self.write_index >= self.messages.len) {
             self.write_index = 0;
         }
-        self.lock.store(WAKE_VALUE, .release);
+        self.mutex.lock();
+        self.mutex.unlock();
+        self.cond.signal();
     }
-    pub fn pushImmediate(self: *Queue, msg: Message) void {
-        self.messages[self.read_index] = msg;
-        self.lock.store(WAKE_VALUE, .release);
-    }
-
     fn isEmpty(self: *Queue) bool {
         return self.read_index == self.write_index;
     }
 
     pub fn pop(self: *Queue, timeout: u64) ?Message {
         if (self.isEmpty()) {
-            std.Thread.Futex.timedWait(&self.lock, WAKE_VALUE, timeout) catch {};
+            self.mutex.lock();
+            defer self.mutex.unlock();
+            self.cond.timedWait(&self.mutex, timeout) catch {};
         }
         if (self.isEmpty()) {
             return null;
         }
-        self.lock.store(0, .release);
         const msg = self.messages[self.read_index];
         self.read_index += 1;
         if (self.read_index >= self.messages.len) {
             self.read_index = 0;
         }
-        if (self.read_index == self.write_index) {}
         return msg;
     }
 };
 
 const Message = union(enum) {
     logout: void,
+    select: mailbox.ImapSession.Box,
+    fetch: mailbox.Uid,
 };
 
 pub var queue: Queue = .{};
@@ -59,17 +58,37 @@ pub var state: State = .{};
 
 pub const State = struct {
     lock: std.Thread.RwLock = .{},
-    boxes: std.ArrayList([]const u8) = .empty,
+    boxes: std.MultiArrayList(mailbox.ImapSession.Box) = .empty,
     data: Data = .{},
+    details: ?mailbox.ImapSession.MailboxDetails = null,
+    preview: ?mailbox.ImapSession.PreviewResult = null,
+    visible_mail: ?mailbox.ImapSession.Email = null,
 
     const Data = struct {
-        host: []const u8 = "",
-        port: usize = 993,
         details: []const u8 = "",
     };
+
+    pub fn deinit(self: *State, alloc: std.mem.Allocator) void {
+        self.lock.lock();
+        defer self.lock.unlock();
+        self.boxes.deinit(alloc);
+        if (self.preview) |p| {
+            p.deinit(alloc);
+            self.preview = null;
+        }
+        if (self.details) |d| {
+            d.deinit(alloc);
+            self.details = null;
+        }
+        if (self.visible_mail) |m| {
+            m.deinit(alloc);
+            self.visible_mail = null;
+        }
+    }
 };
 
-pub fn worker(alloc: std.mem.Allocator, config: mailbox.Config) void {
+pub fn worker(alloc: std.mem.Allocator, config: mailbox.Config, running: *bool, win: *dvui.Window) void {
+    defer log.info("Mailbox Worker exited", .{});
     log.info("Starting Mailbox Worker", .{});
     var ca_bundle = std.crypto.Certificate.Bundle{};
     defer ca_bundle.deinit(alloc);
@@ -79,10 +98,16 @@ pub fn worker(alloc: std.mem.Allocator, config: mailbox.Config) void {
     };
 
     log.info("Connecting to the server", .{});
-    var session = mailbox.ImapSession.connectTls(alloc, .{
-        .host = "imap.gmail.com",
+
+    var session: mailbox.ImapSession = undefined;
+    if (config.port == 993) session.connectTls(alloc, .{
+        .host = config.hostname,
+        .port = config.port,
         .ca_bundle = ca_bundle,
     }) catch |err| {
+        std.log.err("Failed to connect to IMAP server: {}", .{err});
+        return;
+    } else session.connect(alloc, .{ .host = config.hostname, .port = config.port, .ca_bundle = undefined }) catch |err| {
         std.log.err("Failed to connect to IMAP server: {}", .{err});
         return;
     };
@@ -90,10 +115,23 @@ pub fn worker(alloc: std.mem.Allocator, config: mailbox.Config) void {
     {
         state.lock.lock();
         defer state.lock.unlock();
-
-        state.data.host = "imap.gmail.com";
-        state.data.port = 993;
         state.data.details = session.info;
+    }
+    if (config.port != 993) {
+        log.info("Server supports STARTTLS", .{});
+        // TODO: Check capabilities before starting TLS
+        session.startTls(.{ .host = config.hostname, .port = config.port, .ca_bundle = ca_bundle }) catch |err| {
+            std.log.err("Failed to start TLS: {}", .{err});
+            return;
+        };
+    }
+    const cap = session.capability(alloc) catch |err| {
+        std.log.err("Failed to get server capabilities: {}", .{err});
+        return;
+    };
+    if (!cap.has(.auth_plain)) {
+        std.log.err("Server does not support PLAIN authentication", .{});
+        return;
     }
 
     log.info("Authenticating", .{});
@@ -107,20 +145,126 @@ pub fn worker(alloc: std.mem.Allocator, config: mailbox.Config) void {
     };
     defer session.logout();
 
-    log.info("Authentication successful", .{});
+    var box_arena = std.heap.ArenaAllocator.init(alloc);
+    blk: {
+        log.info("Authentication successful", .{});
+        const res = session.list(box_arena.allocator(), "", "*") catch |err| {
+            std.log.err("Failed to list mailboxes: {}", .{err});
+            break :blk;
+        };
+        state.lock.lock();
+        state.boxes = res.boxes;
+        state.lock.unlock();
 
+        dvui.refresh(win, @src(), @enumFromInt(13131313));
+    }
+    defer box_arena.deinit();
 
-    while (true) {
-        if (queue.pop(std.time.ns_per_s * 5)) |msg| {
+    defer log.info("Mailbox Worker exiting", .{});
+    while (running.*) {
+        const start = std.time.milliTimestamp();
+        if (queue.pop(std.time.ns_per_min * 1)) |msg| {
+            const elapsed = std.time.milliTimestamp() - start;
+            log.info("Message received after {d} ms: {any}", .{ elapsed, msg });
             switch (msg) {
                 .logout => {
                     return;
                 },
+                .select => {
+                    log.info("Selecting mailbox: {s}", .{msg.select.name});
+                    const details = session.select(msg.select) catch |err| {
+                        log.err("Failed to select mailbox '{s}': {any}", .{ msg.select.name, err });
+                        continue;
+                    };
+                    log.info("Mailbox '{s}' selected successfully", .{msg.select.name});
+                    {
+                        state.lock.lock();
+                        defer state.lock.unlock();
+                        state.details = details;
+                    }
+
+                    log.info("Fetching mailbox details for '{f}'", .{details});
+                    const preview = session.preview(alloc, .{ .min = 1, .max = details.exists }) catch |err| {
+                        log.err("Failed to fetch mailbox details: {}", .{err});
+                        continue;
+                    };
+                    std.mem.sort(mailbox.ImapSession.PreviewResult.Preview, preview.mail.items, {}, previewCompare);
+                    {
+                        state.lock.lock();
+                        defer state.lock.unlock();
+                        state.preview = preview;
+                    }
+                    dvui.refresh(win, @src(), @enumFromInt(13131313));
+
+                    log.info("Fetched mailbox details for '{f}'", .{preview});
+                },
+                .fetch => {
+                    log.info("Fetching message with UID: {d}", .{msg.fetch});
+                    const fetch_res = session.fetch(alloc, msg.fetch) catch |err| {
+                        log.err("Failed to fetch message UID {d}: {any}", .{ msg.fetch, err });
+                        continue;
+                    };
+                    {
+                        state.lock.lock();
+                        defer state.lock.unlock();
+                        state.visible_mail = fetch_res;
+                    }
+                },
             }
         } else {
+            const elapsed = std.time.milliTimestamp() - start;
+            log.info("No messages received after {} ms, sending NOOP", .{elapsed});
             session.noop() catch |err| {
                 log.err("Failed to send NOOP command: {}", .{err});
             };
         }
     }
+}
+
+fn previewCompare(ctx: void, a: mailbox.ImapSession.PreviewResult.Preview, b: mailbox.ImapSession.PreviewResult.Preview) bool {
+    _ = ctx;
+    const a_milli = a.date.milliTimestamp();
+    const b_milli = b.date.milliTimestamp();
+
+    // Reverse order (newest first)
+    return a_milli > b_milli;
+}
+
+test "Queue" {
+    var q = Queue{};
+
+    try std.testing.expect(q.isEmpty());
+
+    try std.testing.expectEqual(q.pop(10), null);
+    try q.push(.{ .logout = {} });
+    try std.testing.expect(!q.isEmpty());
+    const start = std.time.nanoTimestamp();
+    const msg = q.pop(1000);
+    const elapsed = std.time.nanoTimestamp() - start;
+    errdefer std.debug.print("Elapsed time: {d} ns\n", .{elapsed});
+    try std.testing.expect(elapsed < 500);
+    try std.testing.expectEqual(msg.?, Message{ .logout = {} });
+
+    try std.testing.expect(q.isEmpty());
+    const start2 = std.time.nanoTimestamp();
+    const msg2 = q.pop(1000);
+    const elapsed2 = std.time.nanoTimestamp() - start2;
+    try std.testing.expectEqual(msg2, null);
+    try std.testing.expect(elapsed2 > 500);
+
+    try std.testing.expect(q.isEmpty());
+    const select = Message{
+        .select = mailbox.ImapSession.Box{
+            .folder = "/",
+            .name = "INBOX",
+            .flags = .{},
+        },
+    };
+    try q.push(select);
+    try q.push(.{ .logout = {} });
+    const start3 = std.time.nanoTimestamp();
+    const msg3 = q.pop(1000);
+    const elapsed3 = std.time.nanoTimestamp() - start3;
+    try std.testing.expectEqual(msg3.?, select);
+    try std.testing.expect(elapsed3 < 500);
 }
