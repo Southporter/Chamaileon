@@ -5,7 +5,7 @@ This is early days. This application is in heavy development with a lot changing
 If you have questions or issues, please open a discussion.
 
 ### Dependencies
-DVUI (UI) - https://david-vanderson.github.io/
+DVUI - https://david-vanderson.github.io/
 
 SuperHTML - https://github.com/kristoff-it/superhtml
 
