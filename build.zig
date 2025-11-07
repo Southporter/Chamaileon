@@ -51,12 +51,12 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    exe_mod.addImport("mailbox", lib_mod);
+    exe_mod.addImport("chamaileon", lib_mod);
     exe_mod.addImport("superhtml", superhtml.module("superhtml"));
     exe_mod.addImport("known-folders", known_folders);
 
     const exe = b.addExecutable(.{
-        .name = "mailbox",
+        .name = "chamaileon",
         .root_module = exe_mod,
         .use_llvm = true,
     });
@@ -84,7 +84,7 @@ pub fn build(b: *std.Build) void {
     run_step.dependOn(&run_cmd.step);
 
     const check_exe = b.addExecutable(.{
-        .name = "mailbox",
+        .name = "chamaileon_check",
         .root_module = exe_mod,
     });
 

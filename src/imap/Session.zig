@@ -984,6 +984,7 @@ pub fn preview(self: *Session, alloc: std.mem.Allocator, range: Range) !PreviewR
             }
             var encoded = std.Io.Reader.fixed(value.items);
             var decoded = try std.Io.Writer.Allocating.initCapacity(alloc, value.items.len);
+            defer decoded.deinit();
             try decoding.mimeWord(&encoded, &decoded.writer);
             if (header.tag == .keyword_subject) {
                 view.subject = try decoded.toOwnedSlice();
@@ -1141,4 +1142,30 @@ test "fetchFlags" {
 
     const input = std.fmt.comptimePrint("* FETCH (RFC822 {d}\r\n{s} FLAGS (\\Seen))\r\nS001 OK FETCH completed\r\n", .{ rfc.len, rfc });
     _ = input;
+}
+
+const CopyReadState = enum {
+    untagged,
+    tagged,
+    id,
+};
+
+pub fn copy(self: *Session, uid: Uid, to_box: Box) !void {
+    var tag_buf: [4]u8 = undefined;
+    const tag = std.fmt.bufPrint(&tag_buf, "S{d:0>3}", .{self.tag_id}) catch unreachable;
+    defer self.tag_id += 1;
+    const r = self.reader();
+
+    var w = self.writer();
+    w.print("{s} FETCH {f} RFC822\r\n", .{ tag, uid }) catch |err| {
+        log.err("Failed to write FETCH RFC822 command to IMAP server: {}", .{err});
+        return err;
+    };
+    try self.flush();
+
+    var parser: Parser = .init(r);
+    try parser.expectIdentifier(tag);
+    try parser.expect(.keyword_ok);
+    _ = try r.takeDelimiterInclusive('\n');
+    return;
 }

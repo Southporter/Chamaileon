@@ -7,6 +7,18 @@ const log = std.log.scoped(.ui_view_mail);
 
 pub fn render(alloc: std.mem.Allocator, state: background.State) Page {
     _ = alloc;
+    const win = dvui.currentWindow();
+    for (win.events.items) |event| {
+        switch (event.evt) {
+            .key => |key| {
+                // consume alt key events to avoid them propagating to other widgets
+                if (key.code == .h and key.mod.shiftOnly()) {
+                    return .mailbox_list;
+                }
+            },
+            else => {},
+        }
+    }
     if (state.visible_mail) |email| {
         var content = dvui.box(@src(), .{
             .dir = .vertical,
@@ -19,6 +31,9 @@ pub fn render(alloc: std.mem.Allocator, state: background.State) Page {
 
         if (dvui.button(@src(), "Back", .{}, .{ .expand = .none })) {
             return .mailbox_list;
+        }
+        if (dvui.buttonIcon(@src(), "Trash", dvui.entypo.trash, .{}, .{ .fill_color = .red })) {
+            log.info("Delete clicked", .{});
         }
 
         const active_tab = dvui.dataGetPtrDefault(null, content.data().id, "active_tab", u4, 0);
@@ -170,6 +185,18 @@ pub fn render(alloc: std.mem.Allocator, state: background.State) Page {
                 text_layout.addText("(Unsupported Content Type)", .{});
             },
         }
+    } else {
+        var back = dvui.box(@src(), .{}, .{ .expand = .both, .background = true, .color_fill = .white });
+        defer back.deinit();
+        var container = dvui.flexbox(@src(), .{
+            .justify_content = .center,
+        }, .{ .expand = .both });
+        defer container.deinit();
+        dvui.spinner(@src(), .{});
+        var text = dvui.textLayout(@src(), .{}, .{});
+        defer text.deinit();
+
+        text.addText("Loading Mail", .{});
     }
     return .mail_view;
 }

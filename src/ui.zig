@@ -1,5 +1,7 @@
 const std = @import("std");
 const dvui = @import("dvui");
+const log = std.log.scoped(.ui_menu);
+
 pub const mailbox_select = @import("ui/box_select.zig").render;
 pub const mailbox_list = @import("ui/mailbox_list.zig").render;
 pub const view_mail = @import("ui/view_mail.zig").render;
@@ -10,8 +12,35 @@ pub const Page = enum {
     mail_view,
     err,
 };
+var show_menu: bool = false;
+var hide_menu_at: i128 = 0;
 
 pub fn menu() ?Page {
+    const win = dvui.currentWindow();
+    for (win.events.items) |event| {
+        switch (event.evt) {
+            .key => |key| {
+                if (key.action != .up) {
+                    continue;
+                }
+                // consume alt key events to avoid them propagating to other widgets
+                if (key.code == .right_alt or key.code == .left_alt) {
+                    show_menu = true;
+                    hide_menu_at = win.frame_time_ns + 5_000_000; // 5 seconds
+                }
+            },
+            else => {},
+        }
+    }
+
+    if (!show_menu) {
+        return null;
+    }
+    if (win.frame_time_ns > hide_menu_at) {
+        show_menu = false;
+        return null;
+    }
+
     var m = dvui.menu(@src(), .horizontal, .{ .background = true, .expand = .horizontal });
     defer m.deinit();
 

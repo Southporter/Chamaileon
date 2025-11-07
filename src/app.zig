@@ -1,6 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const mailbox = @import("mailbox");
+const lib = @import("chamaileon");
 const background = @import("worker.zig");
 const dvui = @import("dvui");
 const ui = @import("ui.zig");
@@ -8,7 +8,7 @@ const Backend = dvui.backend;
 comptime {
     std.debug.assert(@hasDecl(Backend, "SDLBackend"));
 }
-const Config = mailbox.Config;
+const Config = lib.Config;
 
 const log = std.log.scoped(.gui);
 
@@ -43,7 +43,7 @@ pub fn main() !void {
         .size = .{ .w = 800.0, .h = 600.0 },
         .min_size = .{ .w = 250.0, .h = 350.0 },
         .vsync = vsync,
-        .title = "Mailbox",
+        .title = "Chamaileon",
         // .icon = window_icon_png, // can also call setIconFromFileContent()
     });
     defer backend.deinit();
@@ -73,7 +73,7 @@ pub fn main() !void {
     defer config.deinit(gpa);
     const worker = try std.Thread.spawn(.{}, background.worker, .{ gpa, config, &running, &win });
     defer worker.join();
-    try worker.setName("Mailbox Worker");
+    try worker.setName("Worker");
     defer {
         log.info("Stopping worker thread", .{});
         background.queue.push(.logout) catch {};
@@ -129,6 +129,10 @@ pub fn main() !void {
 
 // both dvui and SDL drawing
 fn gui_frame(page: ui.Page) ui.Page {
+    const full_screen = dvui.box(@src(), .{}, .{
+        .expand = .both,
+    });
+    defer full_screen.deinit();
     if (ui.menu()) |p| {
         return p;
     }

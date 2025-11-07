@@ -1,5 +1,5 @@
 const std = @import("std");
-const mailbox = @import("mailbox");
+const lib = @import("chamaileon");
 const log = std.log.scoped(.worker);
 const dvui = @import("dvui");
 
@@ -48,8 +48,9 @@ const Queue = struct {
 
 const Message = union(enum) {
     logout: void,
-    select: mailbox.ImapSession.Box,
-    fetch: mailbox.Uid,
+    select: lib.ImapSession.Box,
+    fetch: lib.Uid,
+    trash: lib.Uid,
 };
 
 pub var queue: Queue = .{};
@@ -58,11 +59,11 @@ pub var state: State = .{};
 
 pub const State = struct {
     lock: std.Thread.RwLock = .{},
-    boxes: std.MultiArrayList(mailbox.ImapSession.Box) = .empty,
+    boxes: std.MultiArrayList(lib.ImapSession.Box) = .empty,
     data: Data = .{},
-    details: ?mailbox.ImapSession.MailboxDetails = null,
-    preview: ?mailbox.ImapSession.PreviewResult = null,
-    visible_mail: ?mailbox.Email = null,
+    details: ?lib.ImapSession.MailboxDetails = null,
+    preview: ?lib.ImapSession.PreviewResult = null,
+    visible_mail: ?lib.Email = null,
 
     const Data = struct {
         details: []const u8 = "",
@@ -87,9 +88,9 @@ pub const State = struct {
     }
 };
 
-pub fn worker(alloc: std.mem.Allocator, config: mailbox.Config, running: *bool, win: *dvui.Window) void {
-    defer log.info("Mailbox Worker exited", .{});
-    log.info("Starting Mailbox Worker", .{});
+pub fn worker(alloc: std.mem.Allocator, config: lib.Config, running: *bool, win: *dvui.Window) void {
+    defer log.info("Chamaileon Worker exited", .{});
+    log.info("Starting Chamaileon Worker", .{});
     var ca_bundle = std.crypto.Certificate.Bundle{};
     defer ca_bundle.deinit(alloc);
     ca_bundle.rescan(alloc) catch |err| {
@@ -99,7 +100,7 @@ pub fn worker(alloc: std.mem.Allocator, config: mailbox.Config, running: *bool, 
 
     log.info("Connecting to the server", .{});
 
-    var session: mailbox.ImapSession = undefined;
+    var session: lib.ImapSession = undefined;
     if (config.port == 993) session.connectTls(alloc, .{
         .host = config.hostname,
         .port = config.port,
@@ -160,7 +161,7 @@ pub fn worker(alloc: std.mem.Allocator, config: mailbox.Config, running: *bool, 
     }
     defer box_arena.deinit();
 
-    defer log.info("Mailbox Worker exiting", .{});
+    defer log.info("Chamaileon Worker exiting", .{});
     while (running.*) {
         const start = std.time.milliTimestamp();
         if (queue.pop(std.time.ns_per_min * 1)) |msg| {
@@ -188,7 +189,7 @@ pub fn worker(alloc: std.mem.Allocator, config: mailbox.Config, running: *bool, 
                         log.err("Failed to fetch mailbox details: {}", .{err});
                         continue;
                     };
-                    std.mem.sort(mailbox.ImapSession.PreviewResult.Preview, preview.mail.items, {}, previewCompare);
+                    std.mem.sort(lib.ImapSession.PreviewResult.Preview, preview.mail.items, {}, previewCompare);
                     {
                         state.lock.lock();
                         defer state.lock.unlock();
@@ -218,6 +219,48 @@ pub fn worker(alloc: std.mem.Allocator, config: mailbox.Config, running: *bool, 
                         state.visible_mail = fetch_res;
                     }
                 },
+                .trash => |uid| {
+                    log.info("Trashing message with UID: {d}", .{uid});
+                    const trash_box = blk: {
+                        state.lock.lock();
+                        defer state.lock.unlock();
+
+                        for (state.boxes.items(.name), 0..) |box, i| {
+                            if (std.mem.eql(u8, box, "Trash")) {
+                                break :blk box;
+                            }
+                        }
+                        log.err("Trash mailbox not found", .{});
+                        continue;
+                    };
+                    session.copy(
+                        uid,
+                        trash_box,
+                    ) catch |err| {
+                        log.err("Failed to trash message UID {d}: {any}", .{ uid, err });
+                        continue;
+                    };
+                    {
+                        state.lock.lock();
+                        defer state.lock.unlock();
+                        if (state.preview) |p| {
+                            p.mail.removeByUid(uid);
+                            for (p.mail.items, 0..) |item, index| {
+                                if (item.uid == uid) {
+                                    p.mail.swapRemove(index);
+                                    break;
+                                }
+                            }
+                        }
+                        if (state.visible_mail) |*m| {
+                            if (m.uid == uid) {
+                                m.deinit();
+                                state.visible_mail = null;
+                            }
+                        }
+                    }
+                    log.info("Message UID {d} moved to Trash", .{uid});
+                },
             }
         } else {
             const elapsed = std.time.milliTimestamp() - start;
@@ -229,7 +272,7 @@ pub fn worker(alloc: std.mem.Allocator, config: mailbox.Config, running: *bool, 
     }
 }
 
-fn previewCompare(ctx: void, a: mailbox.ImapSession.PreviewResult.Preview, b: mailbox.ImapSession.PreviewResult.Preview) bool {
+fn previewCompare(ctx: void, a: lib.ImapSession.PreviewResult.Preview, b: lib.ImapSession.PreviewResult.Preview) bool {
     _ = ctx;
     const a_milli = a.date.milliTimestamp();
     const b_milli = b.date.milliTimestamp();
@@ -262,7 +305,7 @@ test "Queue" {
 
     try std.testing.expect(q.isEmpty());
     const select = Message{
-        .select = mailbox.ImapSession.Box{
+        .select = lib.ImapSession.Box{
             .folder = "/",
             .name = "INBOX",
             .flags = .{},
